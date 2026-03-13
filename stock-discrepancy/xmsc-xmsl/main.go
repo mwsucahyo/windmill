@@ -15,186 +15,231 @@ import (
 // require gorm.io/gorm v1.25.12
 // require gorm.io/driver/postgres v1.5.9
 
-// Model definitions
-type trStockMovementHistory struct {
+// --- Models ---
+
+type StockMovement struct {
 	VariantID int `gorm:"column:variant_id"`
 	OfficeID  int `gorm:"column:office_id"`
 }
 
-func (trStockMovementHistory) TableName() string { return "voila.tr_stock_movement_history" }
+func (StockMovement) TableName() string { return "voila.tr_stock_movement_history" }
 
-type msProductVariantStockCatalyst struct {
+type CatalystStock struct {
 	VariantID    int  `gorm:"column:variant_id"`
 	OfficeID     int  `gorm:"column:office_id"`
 	QtyAvailable int  `gorm:"column:qty_available"`
 	IsDeleted    bool `gorm:"column:is_deleted"`
 }
 
-func (msProductVariantStockCatalyst) TableName() string { return "voila.ms_product_variant_stock" }
+func (CatalystStock) TableName() string { return "voila.ms_product_variant_stock" }
 
-type ComparisonResult struct {
-	VariantID   string
+type LegacyStock struct {
+	VariantID    int    `gorm:"column:variant_id"`
+	ProductID    int    `gorm:"column:product_id"`
+	OfficeID     int    `gorm:"column:office_id"`
+	SKU          string `gorm:"column:sku"`
+	OfficeName   string `gorm:"column:office_name"`
+	QtyAvailable int    `gorm:"column:qty_available"`
+}
+
+type Discrepancy struct {
+	VariantID   int
+	ProductID   int
 	SKU         string
-	OfficeID    string
 	OfficeName  string
 	CatalystQty int
 	LegacyQty   int
 	Diff        int
 }
 
-// Helper to build DSN from Windmill Resource Map
-func buildDSN(res interface{}) string {
+// --- Main Entry ---
+
+func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
+	// 1. Resolve DSNs
+	catalystDSN := resolveDSN(xmsCatalystDSN, "u/mirza/catalyst_xms_postgresql_voila_prod")
+	legacyDSN := resolveDSN(xmsLegacyDSN, "u/mirza/voila_postgresql_prod")
+
+	if catalystDSN == "" || legacyDSN == "" {
+		return nil, fmt.Errorf("could not resolve database credentials")
+	}
+
+	// 2. Connect
+	catalystDB, err := connectDB(catalystDSN, true)
+	if err != nil {
+		return nil, fmt.Errorf("catalyst db error: %w", err)
+	}
+
+	legacyDB, err := connectDB(legacyDSN, false)
+	if err != nil {
+		return nil, fmt.Errorf("legacy db error: %w", err)
+	}
+
+	// 3. Get Recent Movements (1 hour)
+	movements, err := getRecentMovements(catalystDB)
+	if err != nil {
+		return nil, err
+	}
+	if len(movements) == 0 {
+		return "No stock movements in the last hour.", nil
+	}
+
+	// 4. Fetch Stock Data
+	catData, err := fetchCatalystData(catalystDB, movements)
+	if err != nil {
+		return nil, err
+	}
+
+	legData, err := fetchLegacyData(legacyDB, movements)
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Compare & Report
+	diffs := compareStocks(movements, catData, legData)
+	if len(diffs) == 0 {
+		return "Success: No stock discrepancies found.", nil
+	}
+
+	return formatMarkdown(diffs), nil
+}
+
+// --- Helper Functions ---
+
+func resolveDSN(provided, resourcePath string) string {
+	// Use provided if it's already a DSN
+	if strings.HasPrefix(provided, "postgres://") {
+		return provided
+	}
+
+	// Try fetching from Windmill resource
+	res, err := wmill.GetResource(resourcePath)
+	if err != nil {
+		return ""
+	}
+
 	m, ok := res.(map[string]interface{})
 	if !ok {
 		return ""
 	}
 
-	// Ambil data dari map. Gunakan fmt.Sprint agar aman jika tipenya (int/string) berbeda
-	user := fmt.Sprint(m["user"])
-	password := fmt.Sprint(m["password"])
-	host := fmt.Sprint(m["host"])
-	port := fmt.Sprint(m["port"])
-	dbname := fmt.Sprint(m["dbname"])
-
-	// Jika field dsn ternyata ada, pakai itu saja
 	if dsn, ok := m["dsn"].(string); ok && dsn != "" {
 		return dsn
 	}
 
-	// Susun format: postgres://user:password@host:port/dbname
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, dbname)
+	// Build from parts if 'dsn' field is missing
+	return fmt.Sprintf("postgres://%v:%v@%v:%v/%v",
+		m["user"], m["password"], m["host"], m["port"], m["dbname"])
 }
 
-func main() (interface{}, error) {
-	// 1. Fetch Catalyst Resource
-	resCatalyst, err := wmill.GetResource("u/mirza/catalyst_xms_postgresql_voila_prod")
+func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
+	config := &gorm.Config{}
+	if isCatalyst {
+		config.NamingStrategy = schema.NamingStrategy{TablePrefix: ""}
+		if !strings.Contains(dsn, "search_path") {
+			if strings.Contains(dsn, "?") {
+				dsn += "&search_path=voila"
+			} else {
+				dsn += "?search_path=voila"
+			}
+		}
+	}
+	return gorm.Open(postgres.Open(dsn), config)
+}
+
+func getRecentMovements(db *gorm.DB) ([]StockMovement, error) {
+	var movements []StockMovement
+	err := db.Debug().Select("DISTINCT variant_id, office_id").
+		Where("qty_column = ? AND created_at >= ?", "qty_available", time.Now().Add(-1*time.Hour)).
+		Find(&movements).Error
+	return movements, err
+}
+
+func applyCompositeFilter(query *gorm.DB, movements []StockMovement, variantCol, officeCol string) *gorm.DB {
+	filter := query.Session(&gorm.Session{})
+	for i, m := range movements {
+		cond := fmt.Sprintf("%s = ? AND %s = ?", variantCol, officeCol)
+		if i == 0 {
+			filter = filter.Where(cond, m.VariantID, m.OfficeID)
+		} else {
+			filter = filter.Or(cond, m.VariantID, m.OfficeID)
+		}
+	}
+	return filter
+}
+
+func fetchCatalystData(db *gorm.DB, movements []StockMovement) (map[string]int, error) {
+	var stocks []CatalystStock
+	query := db.Where("is_deleted = ?", false)
+	err := applyCompositeFilter(query, movements, "variant_id", "office_id").Find(&stocks).Error
 	if err != nil {
-		return nil, fmt.Errorf("failed to get catalyst resource: %v", err)
-	}
-	catalystDSN := buildDSN(resCatalyst)
-	// Tambahkan search_path khusus catalyst
-	if !strings.Contains(catalystDSN, "search_path") {
-		catalystDSN += "?search_path=voila"
+		return nil, fmt.Errorf("catalyst stock query: %w", err)
 	}
 
-	// 2. Fetch Legacy Resource
-	resLegacy, err := wmill.GetResource("u/mirza/voila_postgresql_prod")
-	if err != nil {
-		return nil, fmt.Errorf("failed to get legacy resource: %v", err)
+	data := make(map[string]int)
+	for _, s := range stocks {
+		data[fmt.Sprintf("%d-%d", s.VariantID, s.OfficeID)] = s.QtyAvailable
 	}
-	legacyDSN := buildDSN(resLegacy)
+	return data, nil
+}
 
-	if catalystDSN == "" || legacyDSN == "" {
-		return nil, fmt.Errorf("one or more DSN strings could not be constructed")
-	}
-
-	// 3. Connect to Databases
-	catalystDB, err := gorm.Open(postgres.Open(catalystDSN), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{TablePrefix: ""},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error connecting to Catalyst DB: %v", err)
-	}
-
-	legacyDB, err := gorm.Open(postgres.Open(legacyDSN), &gorm.Config{})
-	if err != nil {
-		return nil, fmt.Errorf("error connecting to Legacy DB: %v", err)
-	}
-
-	// 4. Logic: Fetch Latest Movements (24h)
-	subQuery := catalystDB.Table("voila.tr_stock_movement_history").
-		Select("DISTINCT variant_id, office_id").
-		Where("qty_column = ?", "qty_available").
-		Where("created_at >= ?", time.Now().Add(-1*time.Hour))
-
-	var catalystStocks []msProductVariantStockCatalyst
-	err = catalystDB.Table("voila.ms_product_variant_stock").
-		Where("(variant_id, office_id) IN (?)", subQuery).
-		Where("is_deleted = ?", false).
-		Find(&catalystStocks).Error
-	if err != nil {
-		return nil, fmt.Errorf("catalyst query failed: %v", err)
-	}
-
-	if len(catalystStocks) == 0 {
-		return "No stock movements found in the last 24 hours.", nil
-	}
-
-	catalystDataMap := make(map[string]int)
-	var pairs [][]interface{}
-	for _, s := range catalystStocks {
-		key := fmt.Sprintf("%d-%d", s.VariantID, s.OfficeID)
-		catalystDataMap[key] = s.QtyAvailable
-		pairs = append(pairs, []interface{}{s.VariantID, s.OfficeID})
-	}
-
-	// 5. Query Legacy
-	type LegacyResult struct {
-		VariantID    int
-		SKU          string
-		OfficeID     int
-		OfficeName   string
-		QtyAvailable int
-	}
-	var legacyResults []LegacyResult
-	err = legacyDB.Table("public.ms_product_variant_stock mpvs").
-		Select("mpvs.variant_id, mpv.sku, mpvs.office_id, mo.name as office_name, mpvs.qty_available").
+func fetchLegacyData(db *gorm.DB, movements []StockMovement) (map[string]LegacyStock, error) {
+	var results []LegacyStock
+	query := db.Table("public.ms_product_variant_stock mpvs").
+		Select("mpvs.variant_id, mpv.product_id, mpv.sku, mpvs.office_id, mo.name as office_name, mpvs.qty_available").
 		Joins("JOIN public.ms_office mo ON mo.id = mpvs.office_id").
 		Joins("JOIN public.ms_product_variant mpv ON mpv.id = mpvs.variant_id").
-		Where("(mpvs.variant_id, mpvs.office_id) IN (?)", pairs).
-		Where("mpvs.is_deleted = ?", 0).
-		Scan(&legacyResults).Error
+		Where("mpvs.is_deleted = ?", 0)
 
+	err := applyCompositeFilter(query, movements, "mpvs.variant_id", "mpvs.office_id").Scan(&results).Error
 	if err != nil {
-		return nil, fmt.Errorf("legacy query failed: %v", err)
+		return nil, fmt.Errorf("legacy stock query: %w", err)
 	}
 
-	legacyDataMap := make(map[string]struct {
-		Qty        int
-		OfficeName string
-		SKU        string
-	})
-	for _, r := range legacyResults {
-		key := fmt.Sprintf("%d-%d", r.VariantID, r.OfficeID)
-		legacyDataMap[key] = struct {
-			Qty        int
-			OfficeName string
-			SKU        string
-		}{
-			Qty: r.QtyAvailable, OfficeName: r.OfficeName, SKU: r.SKU,
-		}
+	data := make(map[string]LegacyStock)
+	for _, r := range results {
+		data[fmt.Sprintf("%d-%d", r.VariantID, r.OfficeID)] = r
 	}
+	return data, nil
+}
 
-	// 6. Compare items
-	var results []ComparisonResult
-	for key, catalystQty := range catalystDataMap {
-		legacyInfo, exists := legacyDataMap[key]
-		parts := strings.Split(key, "-")
-		if !exists || catalystQty != legacyInfo.Qty {
-			sku, officeName, legacyQtyVal := "N/A", "N/A", 0
-			if exists {
-				sku, officeName, legacyQtyVal = legacyInfo.SKU, legacyInfo.OfficeName, legacyInfo.Qty
+func compareStocks(movements []StockMovement, cat map[string]int, leg map[string]LegacyStock) []Discrepancy {
+	var diffs []Discrepancy
+	for _, m := range movements {
+		key := fmt.Sprintf("%d-%d", m.VariantID, m.OfficeID)
+		catQty := cat[key]
+		legInfo, exists := leg[key]
+
+		if !exists || catQty != legInfo.QtyAvailable {
+			d := Discrepancy{
+				VariantID:   m.VariantID,
+				CatalystQty: catQty,
 			}
-			results = append(results, ComparisonResult{
-				VariantID: parts[0], SKU: sku, OfficeID: parts[1],
-				OfficeName: officeName, CatalystQty: catalystQty,
-				LegacyQty: legacyQtyVal, Diff: catalystQty - legacyQtyVal,
-			})
+			if exists {
+				d.ProductID, d.SKU, d.OfficeName, d.LegacyQty = legInfo.ProductID, legInfo.SKU, legInfo.OfficeName, legInfo.QtyAvailable
+			} else {
+				d.SKU, d.OfficeName = "N/A", "N/A"
+			}
+			d.Diff = d.CatalystQty - d.LegacyQty
+			diffs = append(diffs, d)
 		}
 	}
+	sort.Slice(diffs, func(i, j int) bool { return diffs[i].Diff > diffs[j].Diff })
+	return diffs
+}
 
-	if len(results) == 0 {
-		return "Success: No stock discrepancies found.", nil
+func formatMarkdown(diffs []Discrepancy) string {
+	var sb strings.Builder
+	sb.WriteString("##### Hi @channel, Ada perbedaan stock antara XMS Catalyst & XMS Legacy, minta tolong dicek yah..\n")
+	sb.WriteString("| Variant ID | SKU | Office | Catalyst | Legacy | Diff | Links |\n")
+	sb.WriteString("| :--- | :--- | :--- | :---: | :---: | :---: | :--- |\n")
+	for _, d := range diffs {
+		catLink := fmt.Sprintf("[Catalyst](https://xms.ctlyst.id/voila/stock/office/%d)", d.VariantID)
+		legLink := "N/A"
+		if d.ProductID != 0 {
+			legLink = fmt.Sprintf("[Legacy](https://xms.voila.id/product/%d/stockOffice)", d.ProductID)
+		}
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %d | %d | %d | %s / %s |\n",
+			d.VariantID, d.SKU, d.OfficeName, d.CatalystQty, d.LegacyQty, d.Diff, catLink, legLink))
 	}
-
-	sort.Slice(results, func(i, j int) bool { return results[i].Diff > results[j].Diff })
-
-	var mmTable strings.Builder
-	mmTable.WriteString("##### Hi @channel, Ada perbedaan stock antara XMS Catalyst & XMS Legacy, minta tolong dicek yah..\n")
-	mmTable.WriteString("| Variant ID | SKU | Office | Catalyst | Legacy | Diff |\n| :--- | :--- | :--- | :---: | :---: | :---: |\n")
-	for _, res := range results {
-		mmTable.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %d | %d |\n", res.VariantID, res.SKU, res.OfficeName, res.CatalystQty, res.LegacyQty, res.Diff))
-	}
-
-	return mmTable.String(), nil
+	return sb.String()
 }

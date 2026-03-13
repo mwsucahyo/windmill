@@ -21,7 +21,12 @@ func main() {
 	}
 
 	// Call the Main function exported by the 'inner' package
-	fmt.Println(inner.Main(resellerDSN, voilaDSN))
+	res, err := inner.Main(resellerDSN, voilaDSN)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Println(res)
 }
 
 func loadEnv() {
