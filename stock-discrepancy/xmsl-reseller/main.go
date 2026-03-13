@@ -150,7 +150,7 @@ func Main(RESELLER_DSN string, XMS_LEGACY_DSN string) string {
 
 	// Build Mattermost Table
 	var mmTable strings.Builder
-	mmTable.WriteString(fmt.Sprintf("### 🚨 Stock Discrepancy Found (Reseller vs Voila)\n"))
+	mmTable.WriteString("### 🚨 Stock Discrepancy Found (Reseller vs Voila)\n")
 	mmTable.WriteString(fmt.Sprintf("Found **%d** discrepancies.\n\n", len(results)))
 	mmTable.WriteString("| Variant ID | Reseller | Voila | Diff |\n")
 	mmTable.WriteString("| :--- | :---: | :---: | :---: |\n")
@@ -174,7 +174,9 @@ func Main(RESELLER_DSN string, XMS_LEGACY_DSN string) string {
 // main allows for local testing; Windmill uses func Main()
 func main() {
 	// Load .env from windmill root directory
-	_ = godotenv.Load("../../.env")
+	_ = godotenv.Load()
+	_ = godotenv.Load("stock-discrepancy/xmsl-reseller/.env")
+
 
 	resellerDSN := os.Getenv("RESELLER_DSN")
 	voilaDSN := os.Getenv("XMS_LEGACY_DSN")

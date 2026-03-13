@@ -31,10 +31,13 @@ This repository contains a collection of Go scripts designed to identify and rep
    ```
 
 2. **Run a Script**:
-   Navigate to the directory of the tool you want to run and execute the `main.go` file.
+   Execute the tool from the root directory using the relative path:
    ```bash
-   cd stock-discrepancy/xmsc-xmsl
-   go run main.go
+   # Compare Catalyst and Legacy
+   go run ./stock-discrepancy/xmsc-xmsl
+
+   # Compare Reseller and Legacy
+   go run ./stock-discrepancy/xmsl-reseller
    ```
 
 ## Windmill Integration
