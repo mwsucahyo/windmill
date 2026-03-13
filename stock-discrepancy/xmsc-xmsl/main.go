@@ -1,31 +1,28 @@
-package main
+package inner
 
 import (
 	"fmt"
-	"log"
-	"os"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/joho/godotenv"
-	windmill "github.com/windmill-labs/windmill-go-client"
+	wmill "github.com/windmill-labs/windmill-go-client"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
 
-// trStockMovementHistory model for Catalyst DB
+// require gorm.io/gorm v1.25.12
+// require gorm.io/driver/postgres v1.5.9
+
+// Model definitions
 type trStockMovementHistory struct {
 	VariantID int `gorm:"column:variant_id"`
 	OfficeID  int `gorm:"column:office_id"`
 }
 
-func (trStockMovementHistory) TableName() string {
-	return "voila.tr_stock_movement_history"
-}
+func (trStockMovementHistory) TableName() string { return "voila.tr_stock_movement_history" }
 
-// msProductVariantStockCatalyst model for Catalyst DB
 type msProductVariantStockCatalyst struct {
 	VariantID    int  `gorm:"column:variant_id"`
 	OfficeID     int  `gorm:"column:office_id"`
@@ -33,78 +30,78 @@ type msProductVariantStockCatalyst struct {
 	IsDeleted    bool `gorm:"column:is_deleted"`
 }
 
-func (msProductVariantStockCatalyst) TableName() string {
-	return "voila.ms_product_variant_stock"
-}
+func (msProductVariantStockCatalyst) TableName() string { return "voila.ms_product_variant_stock" }
 
-// msProductVariantStockLegacy model for Legacy DB
-type msProductVariantStockLegacy struct {
-	VariantID    int `gorm:"column:variant_id"`
-	OfficeID     int `gorm:"column:office_id"`
-	QtyAvailable int `gorm:"column:qty_available"`
-	IsDeleted    int `gorm:"column:is_deleted"`
-}
-
-func (msProductVariantStockLegacy) TableName() string {
-	return "public.ms_product_variant_stock"
-}
-
-// ComparisonResult model for the final table
 type ComparisonResult struct {
-	VariantID    string
-	SKU          string
-	OfficeID     string
-	OfficeName   string
-	CatalystQty  int
-	LegacyQty    int
-	Diff         int
-	Message      string
-	HasDiscovery bool
+	VariantID   string
+	SKU         string
+	OfficeID    string
+	OfficeName  string
+	CatalystQty int
+	LegacyQty   int
+	Diff        int
 }
 
-// Main is the entry point for Windmill
-func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
-	// Fetch Catalyst DSN from Windmill resource if empty
-	if XMS_CATALYST_DSN == "" {
-		res, err := windmill.GetResource("u/mirza/catalyst_xms_postgresql_voila_stg")
-		if err == nil {
-			if dsn, ok := res.(map[string]interface{})["dsn"].(string); ok {
-				XMS_CATALYST_DSN = dsn
-			}
-		}
+// Helper to build DSN from Windmill Resource Map
+func buildDSN(res interface{}) string {
+	m, ok := res.(map[string]interface{})
+	if !ok {
+		return ""
 	}
 
-	// Fetch Legacy DSN from Windmill resource if empty
-	if XMS_LEGACY_DSN == "" {
-		res, err := windmill.GetResource("u/mirza/voila_postgresql_stg")
-		if err == nil {
-			if dsn, ok := res.(map[string]interface{})["dsn"].(string); ok {
-				XMS_LEGACY_DSN = dsn
-			}
-		}
+	// Ambil data dari map. Gunakan fmt.Sprint agar aman jika tipenya (int/string) berbeda
+	user := fmt.Sprint(m["user"])
+	password := fmt.Sprint(m["password"])
+	host := fmt.Sprint(m["host"])
+	port := fmt.Sprint(m["port"])
+	dbname := fmt.Sprint(m["dbname"])
+
+	// Jika field dsn ternyata ada, pakai itu saja
+	if dsn, ok := m["dsn"].(string); ok && dsn != "" {
+		return dsn
 	}
 
-	if XMS_CATALYST_DSN == "" || XMS_LEGACY_DSN == "" {
-		return "Error: Missing DSN. Please provide as parameter or check Windmill resources at 'u/mirza/catalyst_xms_postgresql_voila_stg' and 'u/mirza/voila_postgresql_stg'."
+	// Susun format: postgres://user:password@host:port/dbname
+	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s", user, password, host, port, dbname)
+}
+
+func main() (interface{}, error) {
+	// 1. Fetch Catalyst Resource
+	resCatalyst, err := wmill.GetResource("u/mirza/catalyst_xms_postgresql_voila_prod")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get catalyst resource: %v", err)
+	}
+	catalystDSN := buildDSN(resCatalyst)
+	// Tambahkan search_path khusus catalyst
+	if !strings.Contains(catalystDSN, "search_path") {
+		catalystDSN += "?search_path=voila"
 	}
 
-	// 1. Connect to Catalyst DB
-	catalystDB, err := gorm.Open(postgres.Open(XMS_CATALYST_DSN), &gorm.Config{
-		NamingStrategy: schema.NamingStrategy{
-			TablePrefix: "",
-		},
+	// 2. Fetch Legacy Resource
+	resLegacy, err := wmill.GetResource("u/mirza/voila_postgresql_prod")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get legacy resource: %v", err)
+	}
+	legacyDSN := buildDSN(resLegacy)
+
+	if catalystDSN == "" || legacyDSN == "" {
+		return nil, fmt.Errorf("one or more DSN strings could not be constructed")
+	}
+
+	// 3. Connect to Databases
+	catalystDB, err := gorm.Open(postgres.Open(catalystDSN), &gorm.Config{
+		NamingStrategy: schema.NamingStrategy{TablePrefix: ""},
 	})
 	if err != nil {
-		return fmt.Sprintf("Error connecting to Catalyst DB: %v", err)
+		return nil, fmt.Errorf("error connecting to Catalyst DB: %v", err)
 	}
 
-	// 2. Connect to Legacy DB
-	legacyDB, err := gorm.Open(postgres.Open(XMS_LEGACY_DSN), &gorm.Config{})
+	legacyDB, err := gorm.Open(postgres.Open(legacyDSN), &gorm.Config{})
 	if err != nil {
-		return fmt.Sprintf("Error connecting to Legacy DB: %v", err)
+		return nil, fmt.Errorf("error connecting to Legacy DB: %v", err)
 	}
 
-	// 3. Query Catalyst DB
+	// 4. Logic: Fetch Latest Movements (24h)
 	subQuery := catalystDB.Table("voila.tr_stock_movement_history").
 		Select("DISTINCT variant_id, office_id").
 		Where("qty_column = ?", "qty_available").
@@ -115,13 +112,12 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 		Where("(variant_id, office_id) IN (?)", subQuery).
 		Where("is_deleted = ?", false).
 		Find(&catalystStocks).Error
-
 	if err != nil {
-		return fmt.Sprintf("Query failed on Catalyst DB: %v", err)
+		return nil, fmt.Errorf("catalyst query failed: %v", err)
 	}
 
 	if len(catalystStocks) == 0 {
-		return "No stock movements found in the last 24 hours."
+		return "No stock movements found in the last 24 hours.", nil
 	}
 
 	catalystDataMap := make(map[string]int)
@@ -132,7 +128,7 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 		pairs = append(pairs, []interface{}{s.VariantID, s.OfficeID})
 	}
 
-	// 4. Query Legacy DB
+	// 5. Query Legacy
 	type LegacyResult struct {
 		VariantID    int
 		SKU          string
@@ -141,7 +137,6 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 		QtyAvailable int
 	}
 	var legacyResults []LegacyResult
-
 	err = legacyDB.Table("public.ms_product_variant_stock mpvs").
 		Select("mpvs.variant_id, mpv.sku, mpvs.office_id, mo.name as office_name, mpvs.qty_available").
 		Joins("JOIN public.ms_office mo ON mo.id = mpvs.office_id").
@@ -151,7 +146,7 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 		Scan(&legacyResults).Error
 
 	if err != nil {
-		return fmt.Sprintf("Query failed on Legacy DB: %v", err)
+		return nil, fmt.Errorf("legacy query failed: %v", err)
 	}
 
 	legacyDataMap := make(map[string]struct {
@@ -166,87 +161,40 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 			OfficeName string
 			SKU        string
 		}{
-			Qty:        r.QtyAvailable,
-			OfficeName: r.OfficeName,
-			SKU:        r.SKU,
+			Qty: r.QtyAvailable, OfficeName: r.OfficeName, SKU: r.SKU,
 		}
 	}
 
-	// 5. Compare
+	// 6. Compare items
 	var results []ComparisonResult
 	for key, catalystQty := range catalystDataMap {
 		legacyInfo, exists := legacyDataMap[key]
 		parts := strings.Split(key, "-")
-		variantID := parts[0]
-		officeID := parts[1]
-
-		res := ComparisonResult{
-			VariantID:   variantID,
-			OfficeID:    officeID,
-			CatalystQty: catalystQty,
-		}
-
-		if !exists {
-			res.SKU = "N/A"
-			res.OfficeName = "N/A"
-			res.Message = " (Not found in Legacy)"
-			res.HasDiscovery = true
-			res.Diff = 0
-		} else if catalystQty != legacyInfo.Qty {
-			res.SKU = legacyInfo.SKU
-			res.OfficeName = legacyInfo.OfficeName
-			res.LegacyQty = legacyInfo.Qty
-			res.Diff = catalystQty - legacyInfo.Qty
-			res.Message = " (Mismatch!)"
-			res.HasDiscovery = true
-		}
-
-		if res.HasDiscovery {
-			results = append(results, res)
+		if !exists || catalystQty != legacyInfo.Qty {
+			sku, officeName, legacyQtyVal := "N/A", "N/A", 0
+			if exists {
+				sku, officeName, legacyQtyVal = legacyInfo.SKU, legacyInfo.OfficeName, legacyInfo.Qty
+			}
+			results = append(results, ComparisonResult{
+				VariantID: parts[0], SKU: sku, OfficeID: parts[1],
+				OfficeName: officeName, CatalystQty: catalystQty,
+				LegacyQty: legacyQtyVal, Diff: catalystQty - legacyQtyVal,
+			})
 		}
 	}
 
 	if len(results) == 0 {
-		return "Success: No stock discrepancies found between Catalyst and Legacy."
+		return "Success: No stock discrepancies found.", nil
 	}
 
-	// Sorting by Diff DESC
-	sort.Slice(results, func(i, j int) bool {
-		return results[i].Diff > results[j].Diff
-	})
+	sort.Slice(results, func(i, j int) bool { return results[i].Diff > results[j].Diff })
 
-	// 6. Build Mattermost Table
 	var mmTable strings.Builder
-	mmTable.WriteString("### 🚨 Stock Discrepancy Found (Catalyst vs Legacy)\n")
-	mmTable.WriteString("| Variant ID | SKU | Office | Catalyst | Legacy | Diff |\n")
-	mmTable.WriteString("| :--- | :--- | :--- | :---: | :---: | :---: |\n")
-
+	mmTable.WriteString("##### Hi @channel, Ada perbedaan stock antara XMS Catalyst & XMS Legacy, minta tolong dicek yah..\n")
+	mmTable.WriteString("| Variant ID | SKU | Office | Catalyst | Legacy | Diff |\n| :--- | :--- | :--- | :---: | :---: | :---: |\n")
 	for _, res := range results {
-		if res.Message == " (Not found in Legacy)" {
-			mmTable.WriteString(fmt.Sprintf("| %s | %s | %s | %d | N/A | N/A |\n", res.VariantID, res.SKU, res.OfficeName, res.CatalystQty))
-		} else {
-			mmTable.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %d | %d |\n", res.VariantID, res.SKU, res.OfficeName, res.CatalystQty, res.LegacyQty, res.Diff))
-		}
+		mmTable.WriteString(fmt.Sprintf("| %s | %s | %s | %d | %d | %d |\n", res.VariantID, res.SKU, res.OfficeName, res.CatalystQty, res.LegacyQty, res.Diff))
 	}
 
-	return mmTable.String()
-}
-
-// main allows for local testing; Windmill uses func Main()
-func main() {
-	// Try loading from current directory, one level up, and two levels up
-	_ = godotenv.Load()            // CWD
-	_ = godotenv.Load("../.env")   // e.g. from stock-discrepancy/
-	_ = godotenv.Load("../../.env") // e.g. from stock-discrepancy/xmsc-xmsl/
-
-	catalystDSN := os.Getenv("XMS_CATALYST_DSN")
-	legacyDSN := os.Getenv("XMS_LEGACY_DSN")
-
-	if catalystDSN == "" || legacyDSN == "" {
-		log.Println("Note: XMS_CATALYST_DSN or XMS_LEGACY_DSN not found in environment.")
-		return
-	}
-
-	// Just call Main and print the output
-	fmt.Println(Main(catalystDSN, legacyDSN))
+	return mmTable.String(), nil
 }

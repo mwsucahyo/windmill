@@ -26,18 +26,19 @@ This repository contains a collection of Go scripts designed to identify and rep
 
 1. **Environment Variables**:
    Copy the `.env.example` file to `.env` and fill in your database connection details (DSNs).
+
    ```bash
    cp .env.example .env
    ```
 
-2. **Run a Script**:
-   Execute the tool from the root directory using the relative path:
+2. **Run a Script Locally**:
+   Execute the tool using the `cmd` subfolder:
    ```bash
    # Compare Catalyst and Legacy
-   go run ./stock-discrepancy/xmsc-xmsl
+   go run ./stock-discrepancy/xmsc-xmsl/cmd
 
    # Compare Reseller and Legacy
-   go run ./stock-discrepancy/xmsl-reseller
+   go run ./stock-discrepancy/xmsl-reseller/cmd
    ```
 
 ## Windmill Integration
