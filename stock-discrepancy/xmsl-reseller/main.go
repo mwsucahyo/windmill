@@ -135,7 +135,7 @@ func Main(RESELLER_DSN string, XMS_LEGACY_DSN string) string {
 			ON pv.id = pvs.variant_id
 		WHERE pv.qty_available <> COALESCE(pvs.total_stock, 0)
 		ORDER BY pv.id
-		LIMIT 10;
+		LIMIT 1000;
 `, dblinkConn)
 
 	var results []ComparisonResult
@@ -145,12 +145,12 @@ func Main(RESELLER_DSN string, XMS_LEGACY_DSN string) string {
 	}
 
 	if len(results) == 0 {
-		return "✅ No stock discrepancies found between XMS/Reseller and Voila."
+		return ""
 	}
 
 	// Build Mattermost Table
 	var mmTable strings.Builder
-	mmTable.WriteString("### 🚨 Stock Discrepancy Found (Reseller vs Voila)\n")
+	mmTable.WriteString("##### Stock Discrepancy Found (Reseller vs Voila)\n")
 	mmTable.WriteString(fmt.Sprintf("Found **%d** discrepancies.\n\n", len(results)))
 	mmTable.WriteString("| Variant ID | Reseller | Voila | Diff |\n")
 	mmTable.WriteString("| :--- | :---: | :---: | :---: |\n")
@@ -173,10 +173,10 @@ func Main(RESELLER_DSN string, XMS_LEGACY_DSN string) string {
 
 // main allows for local testing; Windmill uses func Main()
 func main() {
-	// Load .env from windmill root directory
-	_ = godotenv.Load()
-	_ = godotenv.Load("stock-discrepancy/xmsl-reseller/.env")
-
+	// Try loading from current directory, one level up, and two levels up
+	_ = godotenv.Load()             // CWD
+	_ = godotenv.Load("../.env")    // e.g. from stock-discrepancy/
+	_ = godotenv.Load("../../.env") // e.g. from stock-discrepancy/xmsl-reseller/
 
 	resellerDSN := os.Getenv("RESELLER_DSN")
 	voilaDSN := os.Getenv("XMS_LEGACY_DSN")

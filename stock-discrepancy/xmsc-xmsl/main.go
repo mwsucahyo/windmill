@@ -234,8 +234,10 @@ func Main(XMS_CATALYST_DSN string, XMS_LEGACY_DSN string) string {
 
 // main allows for local testing; Windmill uses func Main()
 func main() {
-	_ = godotenv.Load()
-	_ = godotenv.Load("stock-discrepancy/xmsc-xmsl/.env") // fallback to local if any
+	// Try loading from current directory, one level up, and two levels up
+	_ = godotenv.Load()            // CWD
+	_ = godotenv.Load("../.env")   // e.g. from stock-discrepancy/
+	_ = godotenv.Load("../../.env") // e.g. from stock-discrepancy/xmsc-xmsl/
 
 	catalystDSN := os.Getenv("XMS_CATALYST_DSN")
 	legacyDSN := os.Getenv("XMS_LEGACY_DSN")
