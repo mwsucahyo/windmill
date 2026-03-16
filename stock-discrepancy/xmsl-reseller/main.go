@@ -25,6 +25,7 @@ const (
 
 type ComparisonResult struct {
 	ID           int    `gorm:"column:id"`
+	ProductID    int    `gorm:"column:product_id"`
 	SKU          string `gorm:"column:sku"`
 	ResellerQty  int    `gorm:"column:reseller_qty"`
 	XMSLegacyQty int    `gorm:"column:voila_qty"`
@@ -156,7 +157,7 @@ func runDiscrepancyCheck(dsn, dblink string) ([]ComparisonResult, error) {
 
 	query := fmt.Sprintf(`
 		SELECT 
-			pv.id, pv.sku, pv.qty_available AS reseller_qty, COALESCE(pvs.total_stock, 0) AS voila_qty,
+			pv.id, pv.product_id, pv.sku, pv.qty_available AS reseller_qty, COALESCE(pvs.total_stock, 0) AS voila_qty,
 			(pv.qty_available - COALESCE(pvs.total_stock, 0)) AS difference
 		FROM 
 			ms_product_variant pv
@@ -175,10 +176,12 @@ func formatMarkdownReport(data []ComparisonResult) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ada perbedaan stock antara XMS Legacy & Biz, minta tolong dicek yah\n")
 	sb.WriteString(fmt.Sprintf("Found **%d** discrepancies.\n\n", len(data)))
-	sb.WriteString("| Variant ID | SKU | XMS Legacy | Biz | Diff |\n| :--- | :--- | :---: | :---: | :---: |\n")
+	sb.WriteString("| Variant ID | SKU | XMS Legacy | Biz | Diff | Links |\n| :--- | :--- | :---: | :---: | :---: | :--- |\n")
 	for _, r := range data {
-		sb.WriteString(fmt.Sprintf("| %d | %s | %d | %d | **%d** |\n",
-			r.ID, r.SKU, r.XMSLegacyQty, r.ResellerQty, r.Difference))
+		bizLink := fmt.Sprintf("[Biz](https://biz.voila.id/catalog/%d)", r.ProductID)
+		legLink := fmt.Sprintf("[Legacy](https://xms.voila.id/product/%d/stockOffice)", r.ProductID)
+		sb.WriteString(fmt.Sprintf("| %d | %s | %d | %d | **%d** | %s / %s |\n",
+			r.ID, r.SKU, r.XMSLegacyQty, r.ResellerQty, r.Difference, bizLink, legLink))
 	}
 	return sb.String()
 }
