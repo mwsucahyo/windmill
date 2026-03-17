@@ -27,18 +27,18 @@ const (
 	VOILA_UF_BASE_URL     = "https://stg-voila-web.machtwatch.net"
 
 	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_stg"
-	DefaultESUserVariable   = "f/voila_anomalies/voila_es_username_stg"
-	DefaultESPassVariable   = "f/voila_anomalies/voila_es_password_stg"
-	DefaultESURLVariable    = "f/voila_anomalies/voila_es_base_url_stg"
 
-	VaultKeyAddress  = "ELASTIC_ADDRESS"
+	DefaultVaultAddrVariable        = "f/voila_anomalies/vault_addr"
+	DefaultVaultGithubTokenVariable = "f/voila_anomalies/vault_github_token"
+
+	DefaultESUserVariable    = "f/voila_anomalies/voila_es_username_stg"
+	DefaultESPassVariable    = "f/voila_anomalies/voila_es_password_stg"
+	DefaultESURLVariable     = "f/voila_anomalies/voila_es_base_url_stg"
+	DefaultVaultPathVariable = "f/voila_anomalies/vault_path_product_api_stg"
+
 	VaultKeyIndex    = "ELASTIC_PRODUCT_INDEX"
 	VaultKeyUsername = "ELASTIC_USERNAME"
 	VaultKeyPassword = "ELASTIC_PASSWORD"
-
-	DefaultVaultPathVariable        = "f/voila_anomalies/vault_path_stg"
-	DefaultVaultAddrVariable        = "f/voila_anomalies/vault_addr_stg"
-	DefaultVaultGithubTokenVariable = "f/voila_anomalies/vault_github_token_stg"
 
 	// Hardcoded fallback for Vault Addr if variable is empty
 	FallbackVaultAddr = "http://xxx.id:8200"
@@ -116,9 +116,6 @@ func Main(xmsCatalystDSN, esURL string) (interface{}, error) {
 			}
 			if val, ok := vaultData[VaultKeyPassword].(string); ok && val != "" {
 				esPass = val
-			}
-			if val, ok := vaultData[VaultKeyAddress].(string); ok && val != "" {
-				baseURL = val
 			}
 			if val, ok := vaultData[VaultKeyIndex].(string); ok && val != "" {
 				// Construct target URL: [base]/[index]/_search
@@ -289,7 +286,7 @@ func getVaultData(addr, githubToken, path string) map[string]interface{} {
 	}
 	req.Header.Set("X-Vault-Token", activeToken)
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err = client.Do(req)
 	if err != nil {
 		fmt.Printf("Warning: Vault request failed: %v\n", err)
@@ -419,7 +416,7 @@ func fetchESStockByProductIDs(url, user, pass string, productIDs []int) (map[int
 	req.SetBasicAuth(user, pass)
 	req.Header.Add("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
