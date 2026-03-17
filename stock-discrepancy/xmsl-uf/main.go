@@ -31,6 +31,18 @@ const (
 	DefaultESPassVariable   = "f/voila_anomalies/voila_es_password_stg"
 	DefaultESURLVariable    = "f/voila_anomalies/voila_es_base_url_stg"
 
+	VaultKeyAddress  = "ELASTIC_ADDRESS"
+	VaultKeyIndex    = "ELASTIC_PRODUCT_INDEX"
+	VaultKeyUsername = "ELASTIC_USERNAME"
+	VaultKeyPassword = "ELASTIC_PASSWORD"
+
+	DefaultVaultPathVariable        = "f/voila_anomalies/vault_path_stg"
+	DefaultVaultAddrVariable        = "f/voila_anomalies/vault_addr_stg"
+	DefaultVaultGithubTokenVariable = "f/voila_anomalies/vault_github_token_stg"
+
+	// Hardcoded fallback for Vault Addr if variable is empty
+	FallbackVaultAddr = "http://xxx.id:8200"
+
 	StockMovementLookback = 24 * time.Hour
 )
 
@@ -81,15 +93,47 @@ type Discrepancy struct {
 // --- Main Entry ---
 
 func Main(xmsCatalystDSN, esURL string) (interface{}, error) {
-	// 1. Resolve Credentials
+	// 1. Resolve Credentials & URL
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
 
+	// Try resolve from Env/Windmill first
 	esUser := resolveVariable(os.Getenv("ES_USERNAME"), DefaultESUserVariable)
 	esPass := resolveVariable(os.Getenv("ES_PASSWORD"), DefaultESPassVariable)
-	targetURL := resolveVariable(esURL, DefaultESURLVariable)
+	baseURL := resolveVariable(esURL, DefaultESURLVariable)
+	vAddr := resolveVariable(os.Getenv("VAULT_ADDR"), DefaultVaultAddrVariable)
+	if vAddr == "" {
+		vAddr = FallbackVaultAddr
+	}
+	vGithubToken := resolveVariable(os.Getenv("VAULT_GITHUB_TOKEN"), DefaultVaultGithubTokenVariable)
+	vPath := resolveVariable(os.Getenv("VAULT_PATH"), DefaultVaultPathVariable)
+	// 1b. Overwrite with Vault data if available
+	targetURL := baseURL
+	if vAddr != "" && vGithubToken != "" {
+		vaultData := getVaultData(vAddr, vGithubToken, vPath)
+		if len(vaultData) > 0 {
+			if val, ok := vaultData[VaultKeyUsername].(string); ok && val != "" {
+				esUser = val
+			}
+			if val, ok := vaultData[VaultKeyPassword].(string); ok && val != "" {
+				esPass = val
+			}
+			if val, ok := vaultData[VaultKeyAddress].(string); ok && val != "" {
+				baseURL = val
+			}
+			if val, ok := vaultData[VaultKeyIndex].(string); ok && val != "" {
+				// Construct target URL: [base]/[index]/_search
+				targetURL = fmt.Sprintf("%s/%s/_search", strings.TrimSuffix(baseURL, "/"), val)
+			}
+		}
+	}
+
+	// Final check: if targetURL was not set by Vault index logic, ensure it has /_search
+	if targetURL == baseURL && baseURL != "" && !strings.Contains(targetURL, "/_search") {
+		targetURL = strings.TrimSuffix(baseURL, "/") + "/_search"
+	}
 
 	if esUser == "" || esPass == "" || targetURL == "" {
-		return nil, fmt.Errorf("ES credentials (user/pass) or URL could not be resolved")
+		return nil, fmt.Errorf("ES credentials (user/pass) or URL could not be resolved from Env, Windmill, or Vault")
 	}
 
 	// 2. Connect to Catalyst
@@ -159,12 +203,16 @@ func resolveDSN(provided, resourcePath string) string {
 
 	res, err := wmill.GetResource(resourcePath)
 	if err != nil {
-		return ""
+		// Mute warning if it's just a protocol error (running locally)
+		if !strings.Contains(err.Error(), "unsupported protocol scheme") {
+			fmt.Printf("Warning: failed to get resource %s: %v\n", resourcePath, err)
+		}
+		return provided
 	}
 
 	m, ok := res.(map[string]interface{})
 	if !ok {
-		return ""
+		return provided
 	}
 
 	if dsn, ok := m["dsn"].(string); ok && dsn != "" {
@@ -176,6 +224,7 @@ func resolveDSN(provided, resourcePath string) string {
 }
 
 func resolveVariable(provided, variablePath string) string {
+	// 1. Env First: if it's a plain value, use it
 	if provided != "" && !strings.HasPrefix(provided, "f/") && !strings.HasPrefix(provided, "u/") {
 		return provided
 	}
@@ -185,13 +234,86 @@ func resolveVariable(provided, variablePath string) string {
 		path = provided
 	}
 
+	// 2. Windmill Second
 	res, err := wmill.GetVariable(path)
 	if err != nil {
-		fmt.Printf("Warning: failed to get variable %s: %v\n", path, err)
-		return ""
+		// Mute warning if it's just a protocol error (running locally)
+		if !strings.Contains(err.Error(), "unsupported protocol scheme") {
+			fmt.Printf("Warning: failed to get variable %s: %v\n", path, err)
+		}
+		return provided
 	}
 
 	return res
+}
+
+func getVaultData(addr, githubToken, path string) map[string]interface{} {
+	if addr == "" || githubToken == "" {
+		return nil
+	}
+
+	var activeToken string
+	// Login using Github token
+	loginURL := fmt.Sprintf("%s/v1/auth/github/login", strings.TrimSuffix(addr, "/"))
+	loginBody, _ := json.Marshal(map[string]string{"token": githubToken})
+
+	resp, err := http.Post(loginURL, "application/json", bytes.NewBuffer(loginBody))
+	if err != nil {
+		fmt.Printf("Warning: Vault Github login failed: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		var loginRes struct {
+			Auth struct {
+				ClientToken string `json:"client_token"`
+			} `json:"auth"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&loginRes); err == nil {
+			activeToken = loginRes.Auth.ClientToken
+		}
+	} else {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Warning: Vault Github login failed status %d: %s\n", resp.StatusCode, string(body))
+	}
+
+	if activeToken == "" {
+		return nil
+	}
+
+	url := fmt.Sprintf("%s/v1/%s", strings.TrimSuffix(addr, "/"), path)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("X-Vault-Token", activeToken)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err = client.Do(req)
+	if err != nil {
+		fmt.Printf("Warning: Vault request failed: %v\n", err)
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Printf("Warning: Vault returned status %d. Body: %s\n", resp.StatusCode, string(body))
+		return nil
+	}
+
+	var result struct {
+		Data struct {
+			Data map[string]interface{} `json:"data"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil
+	}
+
+	return result.Data.Data
 }
 
 func connectDB(dsn string) (*gorm.DB, error) {
