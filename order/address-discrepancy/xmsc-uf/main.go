@@ -24,10 +24,10 @@ import (
 
 const (
 	XMS_CATALYST_BASE_URL = "https://stg-catalyst-xms-web.machtwatch.net"
-	VOILA_UF_BASE_URL     = "https://stg-voila-web.machtwatch.net"
+	VOILA_UF_WEB_BASE_URL = "https://stg-fe-xms.machtwatch.net"
 
 	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_stg"
-	DefaultMongoResource    = "u/mirza/voila_mongodb_stg"
+	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_stg"
 
 	LookbackDuration = 24 * time.Hour
 )
@@ -46,6 +46,7 @@ type OrderResult struct {
 // --- Models (Mongo) ---
 
 type MongoOrder struct {
+	OrderID     int64 `bson:"order_id"`
 	XmscOrderID int64 `bson:"xmsc_order_id"`
 	Address     struct {
 		ProvinceName    string      `bson:"province_name"`
@@ -56,10 +57,11 @@ type MongoOrder struct {
 }
 
 type Discrepancy struct {
-	OrderNumber string
-	Field       string
-	CatalystVal string
-	MongoVal    string
+	OrderNumber  string
+	VoilaOrderID int64
+	Field        string
+	CatalystVal  string
+	MongoVal     string
 }
 
 // --- Main Entry ---
@@ -67,7 +69,7 @@ type Discrepancy struct {
 func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	// 1. Resolve Credentials
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
-	resolvedMongoURI := resolveVariable(mongoURI, DefaultMongoResource)
+	resolvedMongoURI := resolveMongoURI(mongoURI, DefaultMongoResource)
 
 	if catalystDSN == "" {
 		return nil, fmt.Errorf("catalyst dsn could not be resolved")
@@ -129,13 +131,13 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 		}
 
 		// Comparison
-		compare("Province", o.OrderNumber, o.ProvinceName, mOrder.Address.ProvinceName, &diffs)
-		compare("District", o.OrderNumber, o.DistrictName, mOrder.Address.DistrictName, &diffs)
-		compare("Subdistrict", o.OrderNumber, o.SubdistrictName, mOrder.Address.SubdistrictName, &diffs)
+		compare(o.OrderNumber, mOrder.OrderID, "Province", o.ProvinceName, mOrder.Address.ProvinceName, &diffs)
+		compare(o.OrderNumber, mOrder.OrderID, "District", o.DistrictName, mOrder.Address.DistrictName, &diffs)
+		compare(o.OrderNumber, mOrder.OrderID, "Subdistrict", o.SubdistrictName, mOrder.Address.SubdistrictName, &diffs)
 
 		// Postal code handling (mongo can be int or string)
 		mPostal := fmt.Sprintf("%v", mOrder.Address.PostalCode)
-		compare("Postal Code", o.OrderNumber, o.PostalCode, mPostal, &diffs)
+		compare(o.OrderNumber, mOrder.OrderID, "Postal Code", o.PostalCode, mPostal, &diffs)
 	}
 
 	if len(diffs) == 0 {
@@ -182,10 +184,54 @@ func resolveVariable(provided, variablePath string) string {
 
 	res, err := wmill.GetVariable(path)
 	if err != nil {
+		fmt.Printf("Warning: failed to get variable %s: %v\n", path, err)
 		return provided
 	}
 
 	return res
+}
+
+func resolveMongoURI(provided, resourcePath string) string {
+	// 1. If provided URI directly
+	if strings.HasPrefix(provided, "mongodb://") || strings.HasPrefix(provided, "mongodb+srv://") {
+		return provided
+	}
+
+	path := resourcePath
+	if provided != "" {
+		path = provided
+	}
+
+	// 2. Try as Resource (Windmill)
+	res, err := wmill.GetResource(path)
+	if err == nil {
+		if m, ok := res.(map[string]interface{}); ok {
+			db, _ := m["db"].(string)
+
+			var user, pass string
+			if cred, ok := m["credential"].(map[string]interface{}); ok {
+				user, _ = cred["username"].(string)
+				pass, _ = cred["password"].(string)
+			}
+
+			var host string
+			var port interface{} = 27017
+			if servers, ok := m["servers"].([]interface{}); ok && len(servers) > 0 {
+				if s, ok := servers[0].(map[string]interface{}); ok {
+					host, _ = s["host"].(string)
+					port = s["port"]
+				}
+			}
+
+			if host != "" {
+				// Construct URI
+				return fmt.Sprintf("mongodb://%s:%s@%s:%v/%s?authSource=admin", user, pass, host, port, db)
+			}
+		}
+	}
+
+	// 3. Fallback to Variable (Plain text)
+	return resolveVariable(provided, path)
 }
 
 func extractDBName(uri string) string {
@@ -221,16 +267,17 @@ func connectDB(dsn string) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
-func compare(field, orderNum, catVal, mVal string, diffs *[]Discrepancy) {
+func compare(orderNum string, voilaOrderID int64, field, catVal, mVal string, diffs *[]Discrepancy) {
 	cStr := strings.TrimSpace(strings.ToLower(catVal))
 	mStr := strings.TrimSpace(strings.ToLower(mVal))
 
 	if cStr != mStr {
 		*diffs = append(*diffs, Discrepancy{
-			OrderNumber: orderNum,
-			Field:       field,
-			CatalystVal: catVal,
-			MongoVal:    mVal,
+			OrderNumber:  orderNum,
+			VoilaOrderID: voilaOrderID,
+			Field:        field,
+			CatalystVal:  catVal,
+			MongoVal:     mVal,
 		})
 	}
 }
@@ -238,8 +285,8 @@ func compare(field, orderNum, catVal, mVal string, diffs *[]Discrepancy) {
 func formatMarkdown(diffs []Discrepancy) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ada perbedaan data alamat antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Order Number | Field | XMS Catalyst | Voila UF | Links |\n")
-	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
+	sb.WriteString("| Order Number | Field | XMS Catalyst | Voila UF |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- |\n")
 
 	// Sort by order number for readability
 	sort.Slice(diffs, func(i, j int) bool {
@@ -250,9 +297,14 @@ func formatMarkdown(diffs []Discrepancy) string {
 	})
 
 	for _, d := range diffs {
-		catLink := fmt.Sprintf("[Order Detail](%s/voila/order/order-detail/%s)", XMS_CATALYST_BASE_URL, d.OrderNumber)
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s |\n",
-			d.OrderNumber, d.Field, d.CatalystVal, d.MongoVal, catLink))
+		catLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
+		voilaLink := fmt.Sprintf("%s/order/%d", VOILA_UF_WEB_BASE_URL, d.VoilaOrderID)
+
+		catVal := fmt.Sprintf("[%s](%s)", d.CatalystVal, catLink)
+		mongoVal := fmt.Sprintf("[%s](%s)", d.MongoVal, voilaLink)
+
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+			d.OrderNumber, d.Field, catVal, mongoVal))
 	}
 	return sb.String()
 }

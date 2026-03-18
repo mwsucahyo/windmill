@@ -497,14 +497,14 @@ func compareStocksAtVariantLevel(cat map[int]VariantStockInfo, es map[int]Varian
 func formatMarkdown(diffs []Discrepancy, esURL string) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ada perbedaan stock antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Product ID | Variant ID | SKU | XMS Catalyst | Voila UF | Diff | Links |\n")
-	sb.WriteString("| :--- | :--- | :--- | :---: | :---: | :---: | :--- |\n")
+	sb.WriteString("| Product ID | Variant ID | SKU | XMS Catalyst | Voila UF | Diff |\n")
+	sb.WriteString("| :--- | :--- | :--- | :---: | :---: | :---: |\n")
 	for _, d := range diffs {
-		catLink := fmt.Sprintf("[XMS Catalyst](%s/voila/stock/office/%d)", XMS_CATALYST_BASE_URL, d.ProductID)
-		voilaLink := fmt.Sprintf("[Voila](%s/products/%d)", VOILA_UF_BASE_URL, d.ProductID)
+		catVal := fmt.Sprintf("[%d](%s/voila/stock/office/%d)", d.CatalystQty, XMS_CATALYST_BASE_URL, d.ProductID)
+		voilaVal := fmt.Sprintf("[%d](%s/products/%d)", d.ESQty, VOILA_UF_BASE_URL, d.ProductID)
 
-		sb.WriteString(fmt.Sprintf("| %d | %d | %s | %d | %d | **%d** | %s / %s |\n",
-			d.ProductID, d.VariantID, d.SKU, d.CatalystQty, d.ESQty, d.Diff, catLink, voilaLink))
+		sb.WriteString(fmt.Sprintf("| %d | %d | %s | %s | %s | **%d** |\n",
+			d.ProductID, d.VariantID, d.SKU, catVal, voilaVal, d.Diff))
 	}
 	return sb.String()
 }
