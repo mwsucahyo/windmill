@@ -37,6 +37,7 @@ const (
 type OrderResult struct {
 	ID              int64  `gorm:"column:id"`
 	OrderNumber     string `gorm:"column:order_number"`
+	OrderReference  string `gorm:"column:reference_number"`
 	ProvinceName    string `gorm:"column:province_name"`
 	DistrictName    string `gorm:"column:district_name"`
 	SubdistrictName string `gorm:"column:subdistrict_name"`
@@ -46,9 +47,10 @@ type OrderResult struct {
 // --- Models (Mongo) ---
 
 type MongoOrder struct {
-	OrderID     int64 `bson:"order_id"`
-	XmscOrderID int64 `bson:"xmsc_order_id"`
-	Address     struct {
+	OrderID        int64  `bson:"order_id"`
+	OrderReference string `bson:"order_reference"`
+	XmscOrderID    int64  `bson:"xmsc_order_id"`
+	Address        struct {
 		ProvinceName    string      `bson:"province_name"`
 		DistrictName    string      `bson:"district_name"`
 		SubdistrictName string      `bson:"subdistrict_name"`
@@ -97,7 +99,7 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	// 4. Get Recent Orders from Catalyst
 	var orders []OrderResult
 	err = db.Table("voila.tr_order o").
-		Select("o.id, o.order_number, tos.province_name, tos.district_name, tos.subdistrict_name, tos.postal_code").
+		Select("o.id, o.order_number, o.reference_number, tos.province_name, tos.district_name, tos.subdistrict_name, tos.postal_code").
 		Joins("JOIN voila.tr_order_shipping tos ON tos.order_id = o.id").
 		Where("o.created_at >= ? AND tos.is_replaced = ?", time.Now().Add(-LookbackDuration), false).
 		Scan(&orders).Error
@@ -131,6 +133,7 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 		}
 
 		// Comparison
+		compare(o.OrderNumber, mOrder.OrderID, "Order Reference", o.OrderReference, mOrder.OrderReference, &diffs)
 		compare(o.OrderNumber, mOrder.OrderID, "Province", o.ProvinceName, mOrder.Address.ProvinceName, &diffs)
 		compare(o.OrderNumber, mOrder.OrderID, "District", o.DistrictName, mOrder.Address.DistrictName, &diffs)
 		compare(o.OrderNumber, mOrder.OrderID, "Subdistrict", o.SubdistrictName, mOrder.Address.SubdistrictName, &diffs)
