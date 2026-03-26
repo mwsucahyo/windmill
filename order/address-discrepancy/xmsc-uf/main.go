@@ -23,13 +23,13 @@ import (
 // --- Constants ---
 
 const (
-	XMS_CATALYST_BASE_URL = "https://stg-catalyst-xms-web.machtwatch.net"
-	VOILA_UF_WEB_BASE_URL = "https://stg-fe-xms.machtwatch.net"
+	XMS_CATALYST_BASE_URL = "https://xms.ctlyst.id"
+	XMS_LEGACY_BASE_URL   = "https://xms.voila.id"
 
-	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_stg"
-	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_stg"
+	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_prod"
+	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_prod"
 
-	LookbackDuration = 24 * time.Hour
+	LookbackDuration = 30 * time.Minute
 )
 
 // --- Models (Postgres) ---
@@ -47,10 +47,9 @@ type OrderResult struct {
 // --- Models (Mongo) ---
 
 type MongoOrder struct {
-	OrderID        int64  `bson:"order_id"`
-	OrderReference string `bson:"order_reference"`
-	XmscOrderID    int64  `bson:"xmsc_order_id"`
-	Address        struct {
+	OrderID     int64 `bson:"order_id"`
+	XmscOrderID int64 `bson:"xmsc_order_id"`
+	Address     struct {
 		ProvinceName    string      `bson:"province_name"`
 		DistrictName    string      `bson:"district_name"`
 		SubdistrictName string      `bson:"subdistrict_name"`
@@ -59,11 +58,12 @@ type MongoOrder struct {
 }
 
 type Discrepancy struct {
-	OrderNumber  string
-	VoilaOrderID int64
-	Field        string
-	CatalystVal  string
-	MongoVal     string
+	OrderNumber    string
+	OrderReference string
+	VoilaOrderID   int64
+	Field          string
+	CatalystVal    string
+	MongoVal       string
 }
 
 // --- Main Entry ---
@@ -133,14 +133,13 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 		}
 
 		// Comparison
-		compare(o.OrderNumber, mOrder.OrderID, "Order Reference", o.OrderReference, mOrder.OrderReference, &diffs)
-		compare(o.OrderNumber, mOrder.OrderID, "Province", o.ProvinceName, mOrder.Address.ProvinceName, &diffs)
-		compare(o.OrderNumber, mOrder.OrderID, "District", o.DistrictName, mOrder.Address.DistrictName, &diffs)
-		compare(o.OrderNumber, mOrder.OrderID, "Subdistrict", o.SubdistrictName, mOrder.Address.SubdistrictName, &diffs)
+		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "Province", o.ProvinceName, mOrder.Address.ProvinceName, &diffs)
+		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "District", o.DistrictName, mOrder.Address.DistrictName, &diffs)
+		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "Subdistrict", o.SubdistrictName, mOrder.Address.SubdistrictName, &diffs)
 
 		// Postal code handling (mongo can be int or string)
 		mPostal := fmt.Sprintf("%v", mOrder.Address.PostalCode)
-		compare(o.OrderNumber, mOrder.OrderID, "Postal Code", o.PostalCode, mPostal, &diffs)
+		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "Postal Code", o.PostalCode, mPostal, &diffs)
 	}
 
 	if len(diffs) == 0 {
@@ -228,7 +227,7 @@ func resolveMongoURI(provided, resourcePath string) string {
 
 			if host != "" {
 				// Construct URI
-				return fmt.Sprintf("mongodb://%s:%s@%s:%v/%s?authSource=admin", user, pass, host, port, db)
+				return fmt.Sprintf("mongodb://%s:%s@%s:%v/%s?authSource=admin&directConnection=true", user, pass, host, port, db)
 			}
 		}
 	}
@@ -270,17 +269,18 @@ func connectDB(dsn string) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
-func compare(orderNum string, voilaOrderID int64, field, catVal, mVal string, diffs *[]Discrepancy) {
+func compare(orderNum, orderRef string, voilaOrderID int64, field, catVal, mVal string, diffs *[]Discrepancy) {
 	cStr := strings.TrimSpace(strings.ToLower(catVal))
 	mStr := strings.TrimSpace(strings.ToLower(mVal))
 
 	if cStr != mStr {
 		*diffs = append(*diffs, Discrepancy{
-			OrderNumber:  orderNum,
-			VoilaOrderID: voilaOrderID,
-			Field:        field,
-			CatalystVal:  catVal,
-			MongoVal:     mVal,
+			OrderNumber:    orderNum,
+			OrderReference: orderRef,
+			VoilaOrderID:   voilaOrderID,
+			Field:          field,
+			CatalystVal:    catVal,
+			MongoVal:       mVal,
 		})
 	}
 }
@@ -288,8 +288,8 @@ func compare(orderNum string, voilaOrderID int64, field, catVal, mVal string, di
 func formatMarkdown(diffs []Discrepancy) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ada perbedaan data alamat antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Order Number | Field | XMS Catalyst | Voila UF |\n")
-	sb.WriteString("| :--- | :--- | :--- | :--- |\n")
+	sb.WriteString("| Order Number | Order Reference | Field | XMS Catalyst | Voila UF |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 
 	// Sort by order number for readability
 	sort.Slice(diffs, func(i, j int) bool {
@@ -301,13 +301,13 @@ func formatMarkdown(diffs []Discrepancy) string {
 
 	for _, d := range diffs {
 		catLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
-		voilaLink := fmt.Sprintf("%s/order/%d", VOILA_UF_WEB_BASE_URL, d.VoilaOrderID)
+		voilaLink := fmt.Sprintf("%s/order/%d", XMS_LEGACY_BASE_URL, d.VoilaOrderID)
 
 		catVal := fmt.Sprintf("[%s](%s)", d.CatalystVal, catLink)
 		mongoVal := fmt.Sprintf("[%s](%s)", d.MongoVal, voilaLink)
 
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
-			d.OrderNumber, d.Field, catVal, mongoVal))
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s |\n",
+			d.OrderNumber, d.OrderReference, d.Field, catVal, mongoVal))
 	}
 	return sb.String()
 }
