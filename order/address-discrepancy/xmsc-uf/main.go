@@ -269,9 +269,26 @@ func connectDB(dsn string) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
+func normalize(s string) string {
+	s = strings.ToLower(s)
+	// Replace dots with spaces to separate words like "kab.bogor"
+	s = strings.ReplaceAll(s, ".", " ")
+	words := strings.Fields(s)
+	var res []string
+	for _, w := range words {
+		switch w {
+		case "kabupaten", "kab", "kota", "kecamatan", "kec", "kelurahan", "kel":
+			continue
+		default:
+			res = append(res, w)
+		}
+	}
+	return strings.Join(res, " ")
+}
+
 func compare(orderNum, orderRef string, voilaOrderID int64, field, catVal, mVal string, diffs *[]Discrepancy) {
-	cStr := strings.TrimSpace(strings.ToLower(catVal))
-	mStr := strings.TrimSpace(strings.ToLower(mVal))
+	cStr := normalize(catVal)
+	mStr := normalize(mVal)
 
 	if cStr != mStr {
 		*diffs = append(*diffs, Discrepancy{
