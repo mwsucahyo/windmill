@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-	inner "windmill/order/status-completed/xmsc-uf"
+	inner "windmill/order/status-discrepancy/xmsc-uf"
 
 	"github.com/joho/godotenv"
 )

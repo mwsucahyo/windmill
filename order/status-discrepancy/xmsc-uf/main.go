@@ -41,6 +41,7 @@ type OrderResult struct {
 	OrderNumber    string `gorm:"column:order_number"`
 	OrderReference string `gorm:"column:reference_number"`
 	StatusID       int    `gorm:"column:status_id"`
+	StatusName     string `gorm:"column:status_name"`
 }
 
 // --- Models (Mongo) ---
@@ -55,12 +56,13 @@ type MongoOrder struct {
 }
 
 type Discrepancy struct {
-	OrderNumber     string
-	OrderReference  string
-	VoilaOrderID    int64
-	CatalystStatus  int
-	MongoStatus     int64
-	MongoStatusCode string
+	OrderNumber        string
+	OrderReference     string
+	VoilaOrderID       int64
+	CatalystStatus     int
+	CatalystStatusName string
+	MongoStatus        int64
+	MongoStatusCode    string
 }
 
 // --- Main Entry ---
@@ -93,11 +95,12 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	}
 	defer mClient.Disconnect(ctx)
 
-	// 4. Get Completed Orders from Catalyst (status_id = 5) in the last hour
+	// 4. Get Completed/Canceled Orders from Catalyst (status_id in (4, 5)) in the last interval
 	var orders []OrderResult
-	err = db.Table("voila.tr_order").
-		Select("id, order_number, reference_number, status_id").
-		Where("status_id = ? AND created_at >= ?", 5, time.Now().Add(-LookbackDuration)).
+	err = db.Table("voila.tr_order o").
+		Select("o.id, o.order_number, o.reference_number, o.status_id, ms.name as status_name").
+		Joins("JOIN voila.ms_order_status ms ON ms.id = o.status_id").
+		Where("o.status_id IN (4, 5) AND o.created_at >= ?", time.Now().Add(-LookbackDuration)).
 		Scan(&orders).Error
 
 	if err != nil {
@@ -128,15 +131,27 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 			return nil, fmt.Errorf("mongo error for order %s: %w", o.OrderNumber, err)
 		}
 
-		// Discrepancy check: Catalyst 5 but Mongo not 5 or 6
-		if mOrder.OrderStatus.ID != 5 && mOrder.OrderStatus.ID != 6 {
+		// Discrepancy check
+		isDiscrepancy := false
+		if o.StatusID == 5 { // Completed
+			if mOrder.OrderStatus.ID != 5 && mOrder.OrderStatus.ID != 6 {
+				isDiscrepancy = true
+			}
+		} else if o.StatusID == 4 { // Canceled
+			if mOrder.OrderStatus.ID != 8 && mOrder.OrderStatus.ID != 7 {
+				isDiscrepancy = true
+			}
+		}
+
+		if isDiscrepancy {
 			diffs = append(diffs, Discrepancy{
-				OrderNumber:     o.OrderNumber,
-				OrderReference:  o.OrderReference,
-				VoilaOrderID:    mOrder.OrderID,
-				CatalystStatus:  o.StatusID,
-				MongoStatus:     mOrder.OrderStatus.ID,
-				MongoStatusCode: mOrder.OrderStatus.Code,
+				OrderNumber:        o.OrderNumber,
+				OrderReference:     o.OrderReference,
+				VoilaOrderID:       mOrder.OrderID,
+				CatalystStatus:     o.StatusID,
+				CatalystStatusName: o.StatusName,
+				MongoStatus:        mOrder.OrderStatus.ID,
+				MongoStatusCode:    mOrder.OrderStatus.Code,
 			})
 		}
 	}
@@ -265,9 +280,9 @@ func connectDB(dsn string) (*gorm.DB, error) {
 
 func formatMarkdown(diffs []Discrepancy) string {
 	var sb strings.Builder
-	sb.WriteString("##### Hi @channel, Ada perbedaan status order completed antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Order Number | Order Reference | XMS Status | Voila Status | Voila Code |\n")
-	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
+	sb.WriteString("##### Hi @channel, Ada perbedaan status order completed / canceled antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
+	sb.WriteString("| Order Number | Order Reference | XMS Catalyst Status | Voila UF Status |\n")
+	sb.WriteString("| :--- | :--- | :--- | :--- |\n")
 
 	sort.Slice(diffs, func(i, j int) bool {
 		return diffs[i].OrderNumber < diffs[j].OrderNumber
@@ -280,8 +295,25 @@ func formatMarkdown(diffs []Discrepancy) string {
 		orderNum := fmt.Sprintf("[%s](%s)", d.OrderNumber, catLink)
 		orderRef := fmt.Sprintf("[%s](%s)", d.OrderReference, voilaLink)
 
-		sb.WriteString(fmt.Sprintf("| %s | %s | %d | %d | %s |\n",
-			orderNum, orderRef, d.CatalystStatus, d.MongoStatus, d.MongoStatusCode))
+		catStatus := fmt.Sprintf("%s (%d)", d.CatalystStatusName, d.CatalystStatus)
+		mongoStatus := fmt.Sprintf("%s (%d)", formatMongoCode(d.MongoStatusCode), d.MongoStatus)
+
+		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
+			orderNum, orderRef, catStatus, mongoStatus))
 	}
 	return sb.String()
+}
+
+func formatMongoCode(code string) string {
+	if code == "" {
+		return "Unknown"
+	}
+	// title case and replace underscore with space
+	parts := strings.Split(code, "_")
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, " ")
 }
