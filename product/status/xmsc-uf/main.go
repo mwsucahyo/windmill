@@ -43,7 +43,9 @@ const (
 	// Hardcoded fallback for Vault Addr if variable is empty
 	FallbackVaultAddr = "http://xxx.id:8200"
 
-	StockMovementLookback = 600 * time.Hour
+	StockMovementLookback = 30 * time.Minute
+
+	StatusMatchesMsg = "Success: Product status matches between XMS Catalyst & Voila UF."
 )
 
 // --- Models ---
@@ -177,7 +179,7 @@ func Main(xmsCatalystDSN, esURL string) (interface{}, error) {
 	// 7. Compare
 	diffs := compareProductStatus(catProductStocks, esStatusMap)
 	if len(diffs) == 0 {
-		return "Success: Product status matches between XMS Catalyst & Voila UF.", nil
+		return StatusMatchesMsg, nil
 	}
 
 	return formatMarkdown(diffs), nil
@@ -321,6 +323,7 @@ func fetchCatalystStockAtProductLevel(db *gorm.DB, productIDs []int) (map[int]Pr
 		Joins("JOIN voila.ms_product_variant mpv ON mpv.id = mpvs.variant_id").
 		Where("mpv.product_id IN ? AND mpvs.is_deleted = ?", productIDs, false).
 		Group("mpv.product_id").
+		Debug().
 		Scan(&results).Error
 
 	if err != nil {
