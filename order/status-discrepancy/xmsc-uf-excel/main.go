@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xuri/excelize/v2"
+
 	wmill "github.com/windmill-labs/windmill-go-client"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -16,9 +18,9 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// require gorm.io/gorm v1.25.12
 // require gorm.io/driver/postgres v1.5.9
 // require go.mongodb.org/mongo-driver v1.17.1
+// require github.com/xuri/excelize/v2 v2.9.0
 
 // --- Constants ---
 
@@ -28,9 +30,6 @@ const (
 
 	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_prod"
 	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_prod"
-
-	// LookbackDuration = 30 * time.Minute
-	LookbackDuration = 2 * 24 * time.Hour //1 month
 
 	DefaultSuccessMessage = ""
 )
@@ -48,9 +47,10 @@ type OrderResult struct {
 // --- Models (Mongo) ---
 
 type MongoOrder struct {
-	OrderID     int64 `bson:"order_id"`
-	XmscOrderID int64 `bson:"xmsc_order_id"`
-	OrderStatus struct {
+	OrderID        int64  `bson:"order_id"`
+	OrderReference string `bson:"order_reference"`
+	XmscOrderID    int64  `bson:"xmsc_order_id"`
+	OrderStatus    struct {
 		ID   int64  `bson:"id"`
 		Code string `bson:"code"`
 	} `bson:"order_status"`
@@ -68,7 +68,7 @@ type Discrepancy struct {
 
 // --- Main Entry ---
 
-func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
+func Main(xmsCatalystDSN, mongoURI, startDate, endDate string) (interface{}, error) {
 	// 1. Resolve Credentials
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
 	resolvedMongoURI := resolveMongoURI(mongoURI, DefaultMongoResource)
@@ -80,6 +80,18 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 		return nil, fmt.Errorf("mongo uri could not be resolved")
 	}
 
+	// Parse dates
+	start, err := time.Parse("2006-01-02", startDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid startDate (expected YYYY-MM-DD): %v", err)
+	}
+	end, err := time.Parse("2006-01-02", endDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid endDate (expected YYYY-MM-DD): %v", err)
+	}
+	// Add 23:59:59 to end date to include the full day
+	end = end.Add(23*time.Hour + 59*time.Minute + 59*time.Second)
+
 	// 2. Connect to Catalyst (Postgres)
 	db, err := connectDB(catalystDSN)
 	if err != nil {
@@ -87,7 +99,7 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	}
 
 	// 3. Connect to Voila UF (MongoDB)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 
 	mClient, err := mongo.Connect(ctx, options.Client().ApplyURI(resolvedMongoURI))
@@ -96,12 +108,12 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	}
 	defer mClient.Disconnect(ctx)
 
-	// 4. Get Completed/Canceled Orders from Catalyst (status_id in (4, 5)) in the last interval
+	// 4. Get Orders from Catalyst in the date range
 	var orders []OrderResult
 	err = db.Table("voila.tr_order o").
 		Select("o.id, o.order_number, o.reference_number, o.status_id, ms.name as status_name").
 		Joins("JOIN voila.ms_order_status ms ON ms.id = o.status_id").
-		Where("o.status_id IN (4, 5) AND o.created_at >= ?", time.Now().Add(-LookbackDuration)).
+		Where("o.status_id IN (4, 5) AND o.created_at >= ? AND o.created_at <= ?", start, end).
 		Scan(&orders).Error
 
 	if err != nil {
@@ -109,7 +121,7 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	}
 
 	if len(orders) == 0 {
-		return DefaultSuccessMessage, nil
+		return "No orders found in range", nil
 	}
 
 	// 5. Compare with MongoDB
@@ -117,22 +129,17 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	mColl := mClient.Database(dbName).Collection("order")
 
 	var diffs []Discrepancy
-
 	for _, o := range orders {
 		var mOrder MongoOrder
-		// Filter by Catalyst ID matching Mongo xmsc_order_id
 		filter := bson.M{"xmsc_order_id": o.ID}
 		err := mColl.FindOne(ctx, filter).Decode(&mOrder)
 		if err != nil {
 			if err == mongo.ErrNoDocuments {
-				// We don't log "not found" as a status discrepancy, but maybe it should be?
-				// For now, let's just skip as per target "status discrepancy"
 				continue
 			}
 			return nil, fmt.Errorf("mongo error for order %s: %w", o.OrderNumber, err)
 		}
 
-		// Discrepancy check
 		isDiscrepancy := false
 		if o.StatusID == 5 { // Completed
 			if mOrder.OrderStatus.ID != 5 && mOrder.OrderStatus.ID != 6 {
@@ -145,9 +152,14 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 		}
 
 		if isDiscrepancy {
+			orderRef := o.OrderReference
+			if orderRef == "" {
+				orderRef = mOrder.OrderReference
+			}
+
 			diffs = append(diffs, Discrepancy{
 				OrderNumber:        o.OrderNumber,
-				OrderReference:     o.OrderReference,
+				OrderReference:     orderRef,
 				VoilaOrderID:       mOrder.OrderID,
 				CatalystStatus:     o.StatusID,
 				CatalystStatusName: o.StatusName,
@@ -158,10 +170,10 @@ func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	}
 
 	if len(diffs) == 0 {
-		return DefaultSuccessMessage, nil
+		return "No discrepancies found in range", nil
 	}
 
-	return formatMarkdown(diffs), nil
+	return exportToExcel(diffs)
 }
 
 // --- Helper Functions ---
@@ -279,37 +291,10 @@ func connectDB(dsn string) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
-func formatMarkdown(diffs []Discrepancy) string {
-	var sb strings.Builder
-	sb.WriteString("##### Hi @channel, Ada perbedaan status order completed / canceled antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Order Number | Order Reference | XMS Catalyst Status | Voila UF Status |\n")
-	sb.WriteString("| :--- | :--- | :--- | :--- |\n")
-
-	sort.Slice(diffs, func(i, j int) bool {
-		return diffs[i].OrderNumber < diffs[j].OrderNumber
-	})
-
-	for _, d := range diffs {
-		catLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
-		voilaLink := fmt.Sprintf("%s/order/%d", XMS_LEGACY_BASE_URL, d.VoilaOrderID)
-
-		orderNum := fmt.Sprintf("[%s](%s)", d.OrderNumber, catLink)
-		orderRef := fmt.Sprintf("[%s](%s)", d.OrderReference, voilaLink)
-
-		catStatus := fmt.Sprintf("%s (%d)", d.CatalystStatusName, d.CatalystStatus)
-		mongoStatus := fmt.Sprintf("%s (%d)", formatMongoCode(d.MongoStatusCode), d.MongoStatus)
-
-		sb.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
-			orderNum, orderRef, catStatus, mongoStatus))
-	}
-	return sb.String()
-}
-
 func formatMongoCode(code string) string {
 	if code == "" {
 		return "Unknown"
 	}
-	// title case and replace underscore with space
 	parts := strings.Split(code, "_")
 	for i, p := range parts {
 		if len(p) > 0 {
@@ -317,4 +302,60 @@ func formatMongoCode(code string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+func exportToExcel(diffs []Discrepancy) (interface{}, error) {
+	f := excelize.NewFile()
+	defer func() {
+		if err := f.Close(); err != nil {
+			fmt.Println(err)
+		}
+	}()
+
+	sheetName := "Discrepancy"
+	f.SetSheetName("Sheet1", sheetName)
+
+	headers := []string{"Order Number", "Order Reference", "XMS Catalyst Status", "Voila UF Status", "Catalyst Link", "Voila Link"}
+	for i, h := range headers {
+		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
+		f.SetCellValue(sheetName, cell, h)
+	}
+
+	headerStyle, _ := f.NewStyle(&excelize.Style{
+		Font: &excelize.Font{Bold: true},
+		Fill: excelize.Fill{Type: "pattern", Color: []string{"#CCCCCC"}, Pattern: 1},
+	})
+	f.SetRowStyle(sheetName, 1, 1, headerStyle)
+
+	sort.Slice(diffs, func(i, j int) bool {
+		return diffs[i].OrderNumber < diffs[j].OrderNumber
+	})
+
+	for i, d := range diffs {
+		row := i + 2
+		catLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
+		voilaLink := fmt.Sprintf("%s/order/%d", XMS_LEGACY_BASE_URL, d.VoilaOrderID)
+
+		catStatus := fmt.Sprintf("%s (%d)", d.CatalystStatusName, d.CatalystStatus)
+		mongoStatus := fmt.Sprintf("%s (%d)", formatMongoCode(d.MongoStatusCode), d.MongoStatus)
+
+		f.SetCellValue(sheetName, fmt.Sprintf("A%d", row), d.OrderNumber)
+		f.SetCellValue(sheetName, fmt.Sprintf("B%d", row), d.OrderReference)
+		f.SetCellValue(sheetName, fmt.Sprintf("C%d", row), catStatus)
+		f.SetCellValue(sheetName, fmt.Sprintf("D%d", row), mongoStatus)
+		f.SetCellValue(sheetName, fmt.Sprintf("E%d", row), catLink)
+		f.SetCellValue(sheetName, fmt.Sprintf("F%d", row), voilaLink)
+
+		f.SetCellHyperLink(sheetName, fmt.Sprintf("A%d", row), catLink, "External")
+		f.SetCellHyperLink(sheetName, fmt.Sprintf("B%d", row), voilaLink, "External")
+	}
+
+	f.SetColWidth(sheetName, "A", "F", 25)
+
+	buffer, err := f.WriteToBuffer()
+	if err != nil {
+		return nil, err
+	}
+
+	return buffer.Bytes(), nil
 }
