@@ -1,7 +1,10 @@
 package inner
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -12,8 +15,89 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// require gorm.io/gorm v1.25.12
-// require gorm.io/driver/postgres v1.5.9
+// --- Simple Local Logger for Windmill Workflow ---
+
+var log = &simpleLogger{}
+
+type simpleLogger struct{}
+
+func (l *simpleLogger) emit(lvl string, metadata interface{}, format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	entry := map[string]interface{}{
+		"level": strings.ToLower(lvl),
+		"msg":   msg,
+		"time":  time.Now().Format(time.RFC3339),
+	}
+
+	if metadata != nil {
+		entry["metadata"] = metadata
+	}
+
+	b, err := json.Marshal(entry)
+	if err != nil {
+		// Fallback to simple print if JSON fails
+		fmt.Fprintf(os.Stdout, "[%s] %s (json-error: %v)\n", strings.ToUpper(lvl), msg, err)
+		return
+	}
+	fmt.Fprintln(os.Stdout, string(b))
+}
+
+func (l *simpleLogger) StdInfo(ctx context.Context, metadata interface{}, msg string) {
+	l.emit("info", metadata, "%s", msg)
+}
+
+func (l *simpleLogger) StdInfof(ctx context.Context, metadata interface{}, format string, args ...interface{}) {
+	l.emit("info", metadata, format, args...)
+}
+
+func (l *simpleLogger) StdWarn(ctx context.Context, metadata interface{}, err error, msg string) {
+	meta := map[string]interface{}{}
+	if metadata != nil {
+		if m, ok := metadata.(map[string]interface{}); ok {
+			meta = m
+		} else {
+			meta["context"] = metadata
+		}
+	}
+	if err != nil {
+		meta["error"] = err.Error()
+	}
+	l.emit("warn", meta, "%s", msg)
+}
+
+func (l *simpleLogger) StdWarnf(ctx context.Context, metadata interface{}, err error, format string, args ...interface{}) {
+	meta := map[string]interface{}{}
+	if metadata != nil {
+		if m, ok := metadata.(map[string]interface{}); ok {
+			meta = m
+		} else {
+			meta["context"] = metadata
+		}
+	}
+	if err != nil {
+		meta["error"] = err.Error()
+	}
+	l.emit("warn", meta, format, args...)
+}
+
+func (l *simpleLogger) StdError(ctx context.Context, metadata interface{}, err error, msg string) {
+	meta := map[string]interface{}{}
+	if metadata != nil {
+		if m, ok := metadata.(map[string]interface{}); ok {
+			meta = m
+		} else {
+			meta["context"] = metadata
+		}
+	}
+	if err != nil {
+		meta["error"] = err.Error()
+	}
+	l.emit("error", meta, "%s", msg)
+}
+
+func (l *simpleLogger) StdDebug(ctx context.Context, metadata interface{}, err error, msg string) {
+	l.emit("debug", metadata, "%s", msg)
+}
 
 // --- Models ---
 
@@ -45,6 +129,7 @@ type LegacyStock struct {
 type Discrepancy struct {
 	VariantID   int
 	ProductID   int
+	OfficeID    int
 	SKU         string
 	OfficeName  string
 	CatalystQty int
@@ -54,34 +139,59 @@ type Discrepancy struct {
 
 // --- Main Entry ---
 
+const (
+	CatalystResourcePath = "u/mirza/catalyst_xms_postgresql_voila_stg"
+	LegacyResourcePath   = "u/mirza/voila_postgresql_stg"
+	CatalystSchema       = "voila"
+	HistoryWindow        = 200 * time.Hour
+
+	CatalystStockURL = "https://stg-catalyst-xms-web.machtwatch.net/voila/stock/office/%d?tab=stock&variant_id=%d&id=%d"
+	LegacyProductURL = "https://stg-fe-xms.machtwatch.net/product/%d/stockOffice"
+)
+
 func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
+	ctx := context.Background()
+
+	log.StdInfo(ctx, nil, "Starting stock discrepancy check between Catalyst & Legacy...")
+
 	// 1. Resolve DSNs
-	catalystDSN := resolveDSN(xmsCatalystDSN, "u/mirza/catalyst_xms_postgresql_voila_prod")
-	legacyDSN := resolveDSN(xmsLegacyDSN, "u/mirza/voila_postgresql_prod")
+	catalystDSN := resolveDSN(xmsCatalystDSN, CatalystResourcePath)
+	legacyDSN := resolveDSN(xmsLegacyDSN, LegacyResourcePath)
 
 	if catalystDSN == "" || legacyDSN == "" {
-		return nil, fmt.Errorf("could not resolve database credentials")
+		err := fmt.Errorf("could not resolve database credentials")
+		log.StdError(ctx, nil, err, err.Error())
+		return nil, err
 	}
 
 	// 2. Connect
 	catalystDB, err := connectDB(catalystDSN, true)
 	if err != nil {
-		return nil, fmt.Errorf("catalyst db error: %w", err)
+		err = fmt.Errorf("catalyst db error: %w", err)
+		log.StdError(ctx, nil, err, err.Error())
+		return nil, err
 	}
+	log.StdDebug(ctx, nil, nil, "Connected to Catalyst DB")
 
 	legacyDB, err := connectDB(legacyDSN, false)
 	if err != nil {
-		return nil, fmt.Errorf("legacy db error: %w", err)
+		err = fmt.Errorf("legacy db error: %w", err)
+		log.StdError(ctx, nil, err, err.Error())
+		return nil, err
 	}
+	log.StdDebug(ctx, nil, nil, "Connected to Legacy DB")
 
 	// 3. Get Recent Movements (1 hour)
 	movements, err := getRecentMovements(catalystDB)
 	if err != nil {
+		log.StdError(ctx, nil, err, "failed to get recent movements")
 		return nil, err
 	}
 	if len(movements) == 0 {
+		log.StdInfo(ctx, nil, "No stock movements in the last hour.")
 		return "No stock movements in the last hour.", nil
 	}
+	log.StdInfof(ctx, nil, "Processing %d stock movements", len(movements))
 
 	// 4. Fetch Stock Data
 	catData, err := fetchCatalystData(catalystDB, movements)
@@ -96,8 +206,41 @@ func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
 
 	// 5. Compare & Report
 	diffs := compareStocks(movements, catData, legData)
-	if len(diffs) == 0 {
+
+	totalChecked := len(movements)
+	discrepancyCount := len(diffs)
+	successRate := 100.0
+	if totalChecked > 0 {
+		successRate = float64(totalChecked-discrepancyCount) / float64(totalChecked) * 100.0
+	}
+
+	summaryMetadata := map[string]interface{}{
+		"total_checked":     totalChecked,
+		"discrepancy_count": discrepancyCount,
+		"success_rate":      successRate,
+		"status":            "SUCCESS",
+	}
+
+	if discrepancyCount == 0 {
+		log.StdInfo(ctx, summaryMetadata, "Success: No stock discrepancies found.")
 		return "Success: No stock discrepancies found.", nil
+	}
+
+	summaryMetadata["status"] = "FAILED"
+	log.StdWarnf(ctx, summaryMetadata, nil, "Found %d stock discrepancies", discrepancyCount)
+
+	// Individual discrepancy logging for tracing
+	for _, d := range diffs {
+		log.StdWarnf(ctx, map[string]interface{}{
+			"variant_id":   d.VariantID,
+			"product_id":   d.ProductID,
+			"sku":          d.SKU,
+			"office_name":  d.OfficeName,
+			"catalyst_qty": d.CatalystQty,
+			"legacy_qty":   d.LegacyQty,
+			"diff":         d.Diff,
+			"type":         "discrepancy_detail",
+		}, nil, "Discrepancy found for SKU %s", d.SKU)
 	}
 
 	return formatMarkdown(diffs), nil
@@ -136,10 +279,11 @@ func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
 	if isCatalyst {
 		config.NamingStrategy = schema.NamingStrategy{TablePrefix: ""}
 		if !strings.Contains(dsn, "search_path") {
+			path := fmt.Sprintf("search_path=%s", CatalystSchema)
 			if strings.Contains(dsn, "?") {
-				dsn += "&search_path=voila"
+				dsn += "&" + path
 			} else {
-				dsn += "?search_path=voila"
+				dsn += "?" + path
 			}
 		}
 	}
@@ -149,7 +293,7 @@ func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
 func getRecentMovements(db *gorm.DB) ([]StockMovement, error) {
 	var movements []StockMovement
 	err := db.Debug().Select("DISTINCT variant_id, office_id").
-		Where("qty_column = ? AND created_at >= ?", "qty_available", time.Now().Add(-1*time.Hour)).
+		Where("qty_column = ? AND created_at >= ?", "qty_available", time.Now().Add(-1*HistoryWindow)).
 		Find(&movements).Error
 	return movements, err
 }
@@ -212,6 +356,7 @@ func compareStocks(movements []StockMovement, cat map[string]int, leg map[string
 		if !exists || catQty != legInfo.QtyAvailable {
 			d := Discrepancy{
 				VariantID:   m.VariantID,
+				OfficeID:    m.OfficeID,
 				CatalystQty: catQty,
 			}
 			if exists {
@@ -233,10 +378,10 @@ func formatMarkdown(diffs []Discrepancy) string {
 	sb.WriteString("| Variant ID | SKU | Office | Catalyst | Legacy | Diff | Links |\n")
 	sb.WriteString("| :--- | :--- | :--- | :---: | :---: | :---: | :--- |\n")
 	for _, d := range diffs {
-		catLink := fmt.Sprintf("[Catalyst](https://xms.ctlyst.id/voila/stock/office/%d)", d.VariantID)
+		catLink := fmt.Sprintf("[Catalyst]("+CatalystStockURL+")", d.ProductID, d.VariantID, d.ProductID)
 		legLink := "N/A"
 		if d.ProductID != 0 {
-			legLink = fmt.Sprintf("[Legacy](https://xms.voila.id/product/%d/stockOffice)", d.ProductID)
+			legLink = fmt.Sprintf("[Legacy]("+LegacyProductURL+")", d.ProductID)
 		}
 		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %d | %d | %d | %s / %s |\n",
 			d.VariantID, d.SKU, d.OfficeName, d.CatalystQty, d.LegacyQty, d.Diff, catLink, legLink))
