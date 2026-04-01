@@ -14,6 +14,7 @@ func main() {
 
 	xmsCatalystDSN := os.Getenv("XMS_CATALYST_DSN")
 	xmsLegacyDSN := os.Getenv("XMS_LEGACY_DSN")
+	promPushgatewayURL := os.Getenv("PROM_PUSHGATEWAY_URL")
 
 	if xmsCatalystDSN == "" || xmsLegacyDSN == "" {
 		fmt.Println("Note: XMS_CATALYST_DSN or XMS_LEGACY_DSN missing in environment.")
@@ -21,7 +22,7 @@ func main() {
 	}
 
 	// Call the Main function exported by the 'inner' package
-	res, err := inner.Main(xmsCatalystDSN, xmsLegacyDSN)
+	res, err := inner.Main(xmsCatalystDSN, xmsLegacyDSN, promPushgatewayURL)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

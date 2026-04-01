@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -14,90 +15,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/schema"
 )
-
-// --- Simple Local Logger for Windmill Workflow ---
-
-var log = &simpleLogger{}
-
-type simpleLogger struct{}
-
-func (l *simpleLogger) emit(lvl string, metadata interface{}, format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
-	entry := map[string]interface{}{
-		"level": strings.ToLower(lvl),
-		"msg":   msg,
-		"time":  time.Now().Format(time.RFC3339),
-	}
-
-	if metadata != nil {
-		entry["metadata"] = metadata
-	}
-
-	b, err := json.Marshal(entry)
-	if err != nil {
-		// Fallback to simple print if JSON fails
-		fmt.Fprintf(os.Stdout, "[%s] %s (json-error: %v)\n", strings.ToUpper(lvl), msg, err)
-		return
-	}
-	fmt.Fprintln(os.Stdout, string(b))
-}
-
-func (l *simpleLogger) StdInfo(ctx context.Context, metadata interface{}, msg string) {
-	l.emit("info", metadata, "%s", msg)
-}
-
-func (l *simpleLogger) StdInfof(ctx context.Context, metadata interface{}, format string, args ...interface{}) {
-	l.emit("info", metadata, format, args...)
-}
-
-func (l *simpleLogger) StdWarn(ctx context.Context, metadata interface{}, err error, msg string) {
-	meta := map[string]interface{}{}
-	if metadata != nil {
-		if m, ok := metadata.(map[string]interface{}); ok {
-			meta = m
-		} else {
-			meta["context"] = metadata
-		}
-	}
-	if err != nil {
-		meta["error"] = err.Error()
-	}
-	l.emit("warn", meta, "%s", msg)
-}
-
-func (l *simpleLogger) StdWarnf(ctx context.Context, metadata interface{}, err error, format string, args ...interface{}) {
-	meta := map[string]interface{}{}
-	if metadata != nil {
-		if m, ok := metadata.(map[string]interface{}); ok {
-			meta = m
-		} else {
-			meta["context"] = metadata
-		}
-	}
-	if err != nil {
-		meta["error"] = err.Error()
-	}
-	l.emit("warn", meta, format, args...)
-}
-
-func (l *simpleLogger) StdError(ctx context.Context, metadata interface{}, err error, msg string) {
-	meta := map[string]interface{}{}
-	if metadata != nil {
-		if m, ok := metadata.(map[string]interface{}); ok {
-			meta = m
-		} else {
-			meta["context"] = metadata
-		}
-	}
-	if err != nil {
-		meta["error"] = err.Error()
-	}
-	l.emit("error", meta, "%s", msg)
-}
-
-func (l *simpleLogger) StdDebug(ctx context.Context, metadata interface{}, err error, msg string) {
-	l.emit("debug", metadata, "%s", msg)
-}
 
 // --- Models ---
 
@@ -147,12 +64,19 @@ const (
 
 	CatalystStockURL = "https://stg-catalyst-xms-web.machtwatch.net/voila/stock/office/%d?tab=stock&variant_id=%d&id=%d"
 	LegacyProductURL = "https://stg-fe-xms.machtwatch.net/product/%d/stockOffice"
+
+	DefaultPrometheusVariable = "f/voila_anomalies/push_metrics_data_anomaly_monitoring"
 )
 
-func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
+func Main(xmsCatalystDSN, xmsLegacyDSN, promPushgatewayURL string) (interface{}, error) {
 	ctx := context.Background()
 
-	log.StdInfo(ctx, nil, "Starting stock discrepancy check between Catalyst & Legacy...")
+	// 0. Resolve Prometheus URL
+	pushURL := resolveVariable(promPushgatewayURL, DefaultPrometheusVariable)
+	if pushURL == "" {
+		return nil, fmt.Errorf("could not resolve prometheus url")
+	}
+	fmt.Println("[INFO] Starting stock discrepancy check between Catalyst & Legacy...")
 
 	// 1. Resolve DSNs
 	catalystDSN := resolveDSN(xmsCatalystDSN, CatalystResourcePath)
@@ -160,7 +84,7 @@ func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
 
 	if catalystDSN == "" || legacyDSN == "" {
 		err := fmt.Errorf("could not resolve database credentials")
-		log.StdError(ctx, nil, err, err.Error())
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		return nil, err
 	}
 
@@ -168,30 +92,30 @@ func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
 	catalystDB, err := connectDB(catalystDSN, true)
 	if err != nil {
 		err = fmt.Errorf("catalyst db error: %w", err)
-		log.StdError(ctx, nil, err, err.Error())
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		return nil, err
 	}
-	log.StdDebug(ctx, nil, nil, "Connected to Catalyst DB")
+	fmt.Println("[DEBUG] Connected to Catalyst DB")
 
 	legacyDB, err := connectDB(legacyDSN, false)
 	if err != nil {
 		err = fmt.Errorf("legacy db error: %w", err)
-		log.StdError(ctx, nil, err, err.Error())
+		fmt.Fprintf(os.Stderr, "[ERROR] %v\n", err)
 		return nil, err
 	}
-	log.StdDebug(ctx, nil, nil, "Connected to Legacy DB")
+	fmt.Println("[DEBUG] Connected to Legacy DB")
 
 	// 3. Get Recent Movements (1 hour)
 	movements, err := getRecentMovements(catalystDB)
 	if err != nil {
-		log.StdError(ctx, nil, err, "failed to get recent movements")
+		fmt.Fprintf(os.Stderr, "[ERROR] failed to get recent movements: %v\n", err)
 		return nil, err
 	}
 	if len(movements) == 0 {
-		log.StdInfo(ctx, nil, "No stock movements in the last hour.")
-		return "No stock movements in the last hour.", nil
+		fmt.Println("[INFO] No stock movements in the last hour.")
+		return nil, nil
 	}
-	log.StdInfof(ctx, nil, "Processing %d stock movements", len(movements))
+	fmt.Printf("[INFO] Processing %d stock movements\n", len(movements))
 
 	// 4. Fetch Stock Data
 	catData, err := fetchCatalystData(catalystDB, movements)
@@ -214,34 +138,15 @@ func Main(xmsCatalystDSN, xmsLegacyDSN string) (interface{}, error) {
 		successRate = float64(totalChecked-discrepancyCount) / float64(totalChecked) * 100.0
 	}
 
-	summaryMetadata := map[string]interface{}{
-		"total_checked":     totalChecked,
-		"discrepancy_count": discrepancyCount,
-		"success_rate":      successRate,
-		"status":            "SUCCESS",
-	}
+	// Push to Prometheus Pushgateway
+	pushMetrics(ctx, pushURL, totalChecked, discrepancyCount, successRate)
 
 	if discrepancyCount == 0 {
-		log.StdInfo(ctx, summaryMetadata, "Success: No stock discrepancies found.")
-		return "Success: No stock discrepancies found.", nil
+		fmt.Printf("[INFO] Success: No stock discrepancies found for %d items.\n", totalChecked)
+		return nil, nil
 	}
 
-	summaryMetadata["status"] = "FAILED"
-	log.StdWarnf(ctx, summaryMetadata, nil, "Found %d stock discrepancies", discrepancyCount)
-
-	// Individual discrepancy logging for tracing
-	for _, d := range diffs {
-		log.StdWarnf(ctx, map[string]interface{}{
-			"variant_id":   d.VariantID,
-			"product_id":   d.ProductID,
-			"sku":          d.SKU,
-			"office_name":  d.OfficeName,
-			"catalyst_qty": d.CatalystQty,
-			"legacy_qty":   d.LegacyQty,
-			"diff":         d.Diff,
-			"type":         "discrepancy_detail",
-		}, nil, "Discrepancy found for SKU %s", d.SKU)
-	}
+	fmt.Printf("[WARN] Found %d stock discrepancies out of %d checked (%.2f%% success rate)\n", discrepancyCount, totalChecked, successRate)
 
 	return formatMarkdown(diffs), nil
 }
@@ -274,6 +179,26 @@ func resolveDSN(provided, resourcePath string) string {
 		m["user"], m["password"], m["host"], m["port"], m["dbname"])
 }
 
+func resolveVariable(provided, variablePath string) string {
+	// If it's a plain string (not a path starting with f/ or u/), use it directly
+	if provided != "" && !strings.HasPrefix(provided, "f/") && !strings.HasPrefix(provided, "u/") {
+		return provided
+	}
+
+	// Determine the path to use
+	path := variablePath
+	if provided != "" {
+		path = provided
+	}
+
+	// Fetch from Windmill
+	res, err := wmill.GetVariable(path)
+	if err != nil {
+		return ""
+	}
+	return res
+}
+
 func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
 	config := &gorm.Config{}
 	if isCatalyst {
@@ -288,6 +213,42 @@ func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
 		}
 	}
 	return gorm.Open(postgres.Open(dsn), config)
+}
+
+func pushMetrics(ctx context.Context, url string, total int, count int, rate float64) {
+	if url == "" {
+		return
+	}
+
+	payload := fmt.Sprintf(
+		"stock_sync_total_checked %d\n"+
+			"stock_sync_discrepancy_count %d\n"+
+			"stock_sync_success_rate %f\n",
+		total, count, rate,
+	)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[ERROR] failed to create prometheus request: %v\n", err)
+		return
+	}
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] failed to push metrics to prometheus: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	respJson, _ := json.Marshal(resp)
+	fmt.Println("Prometheus response:", string(respJson))
+
+	if resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "[WARN] prometheus pushgateway returned status %d\n", resp.StatusCode)
+	} else {
+		fmt.Println("[DEBUG] successfully pushed metrics to prometheus")
+	}
 }
 
 func getRecentMovements(db *gorm.DB) ([]StockMovement, error) {
