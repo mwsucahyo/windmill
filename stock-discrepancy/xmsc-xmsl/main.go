@@ -123,6 +123,11 @@ func Main(xmsCatalystDSN, xmsLegacyDSN, promPushgatewayURL string) (interface{},
 		return nil, err
 	}
 
+	totalVariants, err := fetchTotalVariants(catalystDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[WARN] failed to fetch total variants: %v\n", err)
+	}
+
 	legData, err := fetchLegacyData(legacyDB, movements)
 	if err != nil {
 		return nil, err
@@ -139,7 +144,7 @@ func Main(xmsCatalystDSN, xmsLegacyDSN, promPushgatewayURL string) (interface{},
 	}
 
 	// Push to Prometheus Pushgateway
-	pushMetrics(ctx, pushURL, totalChecked, discrepancyCount, successRate)
+	pushMetrics(ctx, pushURL, totalChecked, discrepancyCount, successRate, totalVariants)
 
 	if discrepancyCount == 0 {
 		fmt.Printf("[INFO] Success: No stock discrepancies found for %d items.\n", totalChecked)
@@ -215,17 +220,20 @@ func connectDB(dsn string, isCatalyst bool) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
-func pushMetrics(ctx context.Context, url string, total int, count int, rate float64) {
+func pushMetrics(ctx context.Context, url string, totalChecked int, count int, rate float64, totalVariants int) {
 	if url == "" {
 		return
 	}
 
 	payload := fmt.Sprintf(
-		"stock_sync_total_checked %d\n"+
+		"stock_sync_total_variants %d\n"+
+			"stock_sync_total_checked %d\n"+
 			"stock_sync_discrepancy_count %d\n"+
 			"stock_sync_success_rate %f\n",
-		total, count, rate,
+		totalVariants, totalChecked, count, rate,
 	)
+
+	fmt.Printf("payload: %s\n", payload)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
 	if err != nil {
@@ -270,6 +278,14 @@ func applyCompositeFilter(query *gorm.DB, movements []StockMovement, variantCol,
 		}
 	}
 	return filter
+}
+
+func fetchTotalVariants(db *gorm.DB) (int, error) {
+	var total int64
+	err := db.Table(CatalystStock{}.TableName()).
+		Where("is_deleted = ?", false).
+		Count(&total).Error
+	return int(total), err
 }
 
 func fetchCatalystData(db *gorm.DB, movements []StockMovement) (map[string]int, error) {
