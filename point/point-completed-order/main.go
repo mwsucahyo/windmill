@@ -17,26 +17,24 @@ const (
 	XMS_CATALYST_BASE_URL = "https://xms.ctlyst.id"
 
 	DefaultCatalystResource     = "u/mirza/catalyst_xms_postgresql_voila_prod"
-	DefaultVoilaAccountResource = "u/chandra/voila_account_postgresql_prod"
+	DefaultVoilaAccountResource = "u/sucahyo/voila_account_domain_postgresql_prod"
 )
 
 // --- Models ---
 
 type CompletedOrder struct {
-	ID               int64      `gorm:"column:id"`
-	OrderNumber      string     `gorm:"column:order_number"`
-	CreatedAt        *time.Time `gorm:"column:created_at"`
-	CompletedAt      *time.Time `gorm:"column:completed_at"`
-	CustomerID       int64      `gorm:"column:customer_id"`
-	SalesChannelCode string     `gorm:"column:sales_channel_code"`
-	PlatformSource   string     `gorm:"column:platform_source"`
-	CustomerLink     string     `gorm:"column:customer_link"`
-	OrderLink        string     `gorm:"column:order_link"`
+	ID           int64      `gorm:"column:id"`
+	OrderNumber  string     `gorm:"column:order_number"`
+	CreatedAt    *time.Time `gorm:"column:created_at"`
+	CompletedAt  *time.Time `gorm:"column:completed_at"`
+	CustomerID   int64      `gorm:"column:customer_id"`
+	CustomerLink string     `gorm:"-"`
+	OrderLink    string     `gorm:"-"`
 }
 
 // --- Main Entry ---
 
-func Main(xmsCatalystDSN, voilaAccountDSN string, orderID int) (interface{}, error) {
+func Main(xmsCatalystDSN, voilaAccountDSN string) (interface{}, error) {
 	// 1. Resolve Credentials
 	fmt.Println("Resolving DSNs...")
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
@@ -58,11 +56,6 @@ func Main(xmsCatalystDSN, voilaAccountDSN string, orderID int) (interface{}, err
 	// 3. Query
 	fmt.Println("Running query...")
 
-	whereClause := ""
-	if orderID != 0 {
-		whereClause = fmt.Sprintf("\n\t\tAND o.id = %d", orderID)
-	}
-
 	// Use the SQL structure provided by the user
 	query := fmt.Sprintf(`
 		SELECT 
@@ -70,44 +63,52 @@ func Main(xmsCatalystDSN, voilaAccountDSN string, orderID int) (interface{}, err
 			o.order_number,
 			o.created_at,
 			o.completed_at,
-			oc.customer_id,
-			o.sales_channel_code,
-			o.platform_source,
-			'https://xms-customer.voila.id/customer/' || oc.customer_id || '/loyalty' AS customer_link,
-			'https://xms.ctlyst.id/voila/order/order-detail/' || o.order_number AS order_link
+			oc.customer_id
 		FROM tr_order o
 		INNER JOIN tr_order_customer oc 
 			ON oc.order_id = o.id
 		LEFT JOIN dblink(
 			'%s',
-			'SELECT cco.xmsc_order_id, a.is_verified
-			 FROM customer_completed_order cco
-			 LEFT JOIN account a 
-			   ON a.customer_id = cco.customer_id
-			 WHERE cco.created_at >= ''2026-02-10'''
+			'SELECT customer_id, is_verified
+			 FROM account'
 		) AS acc(
-			xmsc_order_id BIGINT,
+			customer_id BIGINT,
 			is_verified BOOLEAN
 		)
-			ON o.id = acc.xmsc_order_id
-		WHERE acc.xmsc_order_id IS NULL
-		AND o.status_id = 5
+			ON oc.customer_id = acc.customer_id
+		LEFT JOIN dblink(
+			'%s',
+			'SELECT xmsc_order_id
+			 FROM customer_completed_order
+			 WHERE created_at >= ''2026-02-10'''
+		) AS cco(
+			xmsc_order_id BIGINT
+		)
+			ON o.id = cco.xmsc_order_id
+		WHERE o.status_id = 5
 		AND o.completed_at <= NOW() - INTERVAL '4 days'
 		AND o.point_earned > 0
 		AND o.sales_channel_code != 'RESELLER'
 		AND o.created_at >= DATE '2026-02-10'
-		AND (acc.is_verified = FALSE OR acc.is_verified IS NULL) %s
-	`, dblinkConn, whereClause)
+		AND cco.xmsc_order_id IS NULL
+		AND acc.is_verified = true LIMIT 10
+	`, dblinkConn, dblinkConn)
 
 	var results []CompletedOrder
 	err = db.Raw(query).Scan(&results).Error
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
+
+	for i := range results {
+		results[i].CustomerLink = fmt.Sprintf("https://xms-customer.voila.id/customer/%d/loyalty", results[i].CustomerID)
+		results[i].OrderLink = fmt.Sprintf("https://xms.ctlyst.id/voila/order/order-detail/%s", results[i].OrderNumber)
+	}
+
 	fmt.Printf("Query finished. Found %d results.\n", len(results))
 
 	if len(results) == 0 {
-		return "No results found for the given criteria.", nil
+		return nil, nil
 	}
 
 	return formatMarkdown(results), nil
@@ -156,8 +157,8 @@ func connectDB(dsn string) (*gorm.DB, error) {
 
 func formatMarkdown(data []CompletedOrder) string {
 	var sb strings.Builder
-	sb.WriteString("### Completed Order Check Results\n\n")
-	sb.WriteString("| Order ID | Order Number | Created At | Completed At | Customer ID | Sales Channel | Platform Source | Order Link | Customer Link |\n")
+	sb.WriteString("##### Hi @oncall-voila, Ditemukan order COMPLETED yang data-nya XMS Catalyst sudah completed tapi belum ada data completed order-nya di voila_account, tolong dicek yah..\n")
+	sb.WriteString("| Order ID | Order Number | Created At | Completed At | Customer ID | Order Link | Customer Link |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n")
 
 	for _, d := range data {
@@ -170,8 +171,8 @@ func formatMarkdown(data []CompletedOrder) string {
 			completedAt = d.CompletedAt.Format("2006-01-02 15:04:05")
 		}
 
-		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %d | %s | %s | [View Order](%s) | [View Customer](%s) |\n",
-			d.ID, d.OrderNumber, createdAt, completedAt, d.CustomerID, d.SalesChannelCode, d.PlatformSource, d.OrderLink, d.CustomerLink))
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %d | [View Order](%s) | [View Customer](%s) |\n",
+			d.ID, d.OrderNumber, createdAt, completedAt, d.CustomerID, d.OrderLink, d.CustomerLink))
 	}
 	return sb.String()
 }

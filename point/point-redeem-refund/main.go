@@ -141,7 +141,7 @@ func connectDB(dsn string) (*gorm.DB, error) {
 
 func formatMarkdown(data []PointDiscrepancy) string {
 	var sb strings.Builder
-	sb.WriteString("##### Hi @channel, Ditemukan order CANCELED yang point-nya sudah di-redeem tapi belum ada data refund point-nya di voila_account, tolong dicek yah..\n")
+	sb.WriteString("##### Hi @oncall-voila, Ditemukan order CANCELED yang point-nya sudah di-redeem tapi belum ada data refund point-nya di voila_account, tolong dicek yah..\n")
 	sb.WriteString("| ID | Order Number | Customer ID | Points Redeemed | Action |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 

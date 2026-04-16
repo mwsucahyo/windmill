@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	inner "windmill/point/pooint-completed-order"
+	inner "windmill/point/point-completed-order"
 
 	"github.com/joho/godotenv"
 )
