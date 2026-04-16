@@ -12,12 +12,12 @@ func main() {
 	// Load environment variables locally
 	loadEnv()
 
-	xmsCatalystDSN := os.Getenv("XMS_CATALYST_DSN")
+	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
 	xmsLegacyDSN := os.Getenv("XMS_LEGACY_DSN")
 	promPushgatewayURL := os.Getenv("PROM_PUSHGATEWAY_URL")
 
 	if xmsCatalystDSN == "" || xmsLegacyDSN == "" {
-		fmt.Println("Note: XMS_CATALYST_DSN or XMS_LEGACY_DSN missing in environment.")
+		fmt.Println("Note: XMS_CATALYST_VOILA_DSN or XMS_LEGACY_DSN missing in environment.")
 		return
 	}
 

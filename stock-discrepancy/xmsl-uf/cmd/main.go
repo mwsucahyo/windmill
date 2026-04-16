@@ -12,7 +12,7 @@ func main() {
 	// Load environment variables locally
 	loadEnv()
 
-	xmsCatalystDSN := os.Getenv("XMS_CATALYST_DSN")
+	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
 	esURL := os.Getenv("ES_URL")
 
 	// Call the Main function exported by the 'inner' package

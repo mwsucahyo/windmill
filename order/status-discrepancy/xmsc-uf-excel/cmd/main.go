@@ -12,7 +12,7 @@ func main() {
 	// Load environment variables locally
 	loadEnv()
 
-	xmsCatalystDSN := os.Getenv("XMS_CATALYST_DSN")
+	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
 	mongoURI := os.Getenv("VOILA_UF_MONGO_URI")
 
 	startDate := "2026-03-01"

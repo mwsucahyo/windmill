@@ -14,9 +14,10 @@ import (
 
 const (
 	XMS_CATALYST_BASE_URL = "https://xms.ctlyst.id"
+	XMS_CUSTOMER_BASE_URL = "https://xms-customer.voila.id"
 
 	DefaultCatalystResource     = "u/mirza/catalyst_xms_postgresql_voila_prod"
-	DefaultVoilaAccountResource = "u/chandra/voila_account_postgresql_prod"
+	DefaultVoilaAccountResource = "u/sucahyo/voila_account_domain_postgresql_prod"
 )
 
 // --- Models ---
@@ -32,23 +33,37 @@ type PointDiscrepancy struct {
 
 func Main(xmsCatalystDSN, voilaAccountDSN string) (interface{}, error) {
 	// 1. Resolve Credentials
+	fmt.Println("Resolving DSNs...")
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
 	if catalystDSN == "" {
 		return nil, fmt.Errorf("catalyst dsn could not be resolved")
 	}
 
 	dblinkConn := resolveDSN(voilaAccountDSN, DefaultVoilaAccountResource)
+	fmt.Println("DSNs resolved.")
 
 	// 2. Connect to Catalyst (Postgres)
+	fmt.Println("Connecting to Catalyst DB...")
 	db, err := connectDB(catalystDSN)
 	if err != nil {
 		return nil, fmt.Errorf("catalyst db error: %w", err)
 	}
+	fmt.Println("Connected to Catalyst DB.")
 
 	// 3. Query Discrepancy
-	// Status 4 is CANCELED. We are looking for Canceled orders where points were redeemed
-	// but no refund record exists in voila_account.account_point.
+	fmt.Println("Running discrepancy query (this might take a while if dblink connection is slow)...", dblinkConn)
+	// Status 4 is CANCELED...
 	query := fmt.Sprintf(`
+		WITH ap AS (
+			SELECT order_id
+			FROM public.dblink('%s',
+				$$
+				SELECT order_id
+				FROM public.account_point
+				WHERE source = 'refund'
+				$$
+			) AS t(order_id INT)
+		)
 		SELECT 
 			o.id,
 			o.order_number,
@@ -56,24 +71,17 @@ func Main(xmsCatalystDSN, voilaAccountDSN string) (interface{}, error) {
 			SUM(d.amount) AS total_point_redeemed
 		FROM voila.tr_order o
 		INNER JOIN voila.tr_order_customer oc ON oc.order_id = o.id
-		INNER JOIN voila.tr_order_discount d ON d.order_id = o.id AND d.code = 'point_redeemed' AND d.deleted_at IS NULL
+		INNER JOIN voila.tr_order_discount d 
+			ON d.order_id = o.id 
+			AND d.code = 'point_redeemed' 
+			AND d.deleted_at IS NULL
+		LEFT JOIN ap ON ap.order_id = o.id
 		WHERE o.status_id = 4
 		AND o.is_deleted = false
 		AND o.sales_channel_code != 'RESELLER'
-		AND NOT EXISTS (
-			SELECT 1
-			FROM public.dblink('%s',
-				$$
-				SELECT order_id
-				FROM public.account_point
-				WHERE source = 'refund'
-				$$
-			) AS ap(order_id INT)
-			WHERE ap.order_id = o.id
-		)
-		GROUP BY 
-			o.id, o.order_number, oc.customer_id
-		LIMIT 100
+		AND ap.order_id IS NULL
+		GROUP BY o.id, o.order_number, oc.customer_id
+		LIMIT 10
 	`, dblinkConn)
 
 	var discrepancies []PointDiscrepancy
@@ -81,6 +89,7 @@ func Main(xmsCatalystDSN, voilaAccountDSN string) (interface{}, error) {
 	if err != nil {
 		return nil, fmt.Errorf("query error: %w", err)
 	}
+	fmt.Printf("Query finished. Found %d discrepancies.\n", len(discrepancies))
 
 	if len(discrepancies) == 0 {
 		return nil, nil
@@ -133,13 +142,14 @@ func connectDB(dsn string) (*gorm.DB, error) {
 func formatMarkdown(data []PointDiscrepancy) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ditemukan order CANCELED yang point-nya sudah di-redeem tapi belum ada data refund point-nya di voila_account, tolong dicek yah..\n")
-	sb.WriteString("| ID | Order Number | Customer ID | Points Redeemed | Link |\n")
+	sb.WriteString("| ID | Order Number | Customer ID | Points Redeemed | Action |\n")
 	sb.WriteString("| :--- | :--- | :--- | :--- | :--- |\n")
 
 	for _, d := range data {
-		catLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
-		sb.WriteString(fmt.Sprintf("| %d | %s | %d | %.2f | [View Detail](%s) |\n",
-			d.ID, d.OrderNumber, d.CustomerID, d.TotalPointRedeemed, catLink))
+		orderLink := fmt.Sprintf("%s/voila/order/order-detail/%s", XMS_CATALYST_BASE_URL, d.OrderNumber)
+		customerLink := fmt.Sprintf("%s/customer/%d", XMS_CUSTOMER_BASE_URL, d.CustomerID)
+		sb.WriteString(fmt.Sprintf("| %d | %s | [%d](%s) | %.2f | [Order Detail](%s) |\n",
+			d.ID, d.OrderNumber, d.CustomerID, customerLink, d.TotalPointRedeemed, orderLink))
 	}
 	return sb.String()
 }

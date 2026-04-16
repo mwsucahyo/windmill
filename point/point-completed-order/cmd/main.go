@@ -3,7 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
-	inner "windmill/order/address-discrepancy/xmsc-uf"
+	"strconv"
+	inner "windmill/point/pooint-completed-order"
 
 	"github.com/joho/godotenv"
 )
@@ -13,10 +14,13 @@ func main() {
 	loadEnv()
 
 	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
-	mongoURI := os.Getenv("VOILA_UF_MONGO_URI")
+	voilaAccountDSN := os.Getenv("VOILA_ACCOUNT_DSN")
+
+	orderIDStr := os.Getenv("ORDER_ID")
+	orderID, _ := strconv.Atoi(orderIDStr)
 
 	// Call the Main function exported by the 'inner' package
-	res, err := inner.Main(xmsCatalystDSN, mongoURI)
+	res, err := inner.Main(xmsCatalystDSN, voilaAccountDSN, orderID)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
@@ -29,5 +33,4 @@ func loadEnv() {
 	_ = godotenv.Load("../.env")
 	_ = godotenv.Load("../../.env")
 	_ = godotenv.Load("../../../.env")
-	_ = godotenv.Load("../../../../.env")
 }
