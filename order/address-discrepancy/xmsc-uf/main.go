@@ -2,10 +2,7 @@ package inner
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -32,8 +29,7 @@ const (
 	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_prod"
 	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_prod"
 
-	LookbackDuration          = 30 * time.Minute
-	DefaultPrometheusVariable = "f/voila_anomalies/push_metrics_data_anomaly_monitoring"
+	LookbackDuration = 30 * time.Minute
 )
 
 // --- Models (Postgres) ---
@@ -72,12 +68,7 @@ type Discrepancy struct {
 
 // --- Main Entry ---
 
-func Main(xmsCatalystDSN, mongoURI, promPushgatewayURL string) (interface{}, error) {
-	ctx := context.Background()
-
-	// 0. Resolve Prometheus URL
-	pushURL := resolveVariable(promPushgatewayURL, DefaultPrometheusVariable)
-
+func Main(xmsCatalystDSN, mongoURI string) (interface{}, error) {
 	// 1. Resolve Credentials
 	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
 	resolvedMongoURI := resolveMongoURI(mongoURI, DefaultMongoResource)
@@ -118,7 +109,7 @@ func Main(xmsCatalystDSN, mongoURI, promPushgatewayURL string) (interface{}, err
 	}
 
 	if len(orders) == 0 {
-		return "No orders found in the last 1 hour.", nil
+		return "", nil
 	}
 
 	// 5. Compare with MongoDB
@@ -148,25 +139,22 @@ func Main(xmsCatalystDSN, mongoURI, promPushgatewayURL string) (interface{}, err
 
 		// Postal code handling (mongo can be int or string)
 		mPostal := fmt.Sprintf("%v", mOrder.Address.PostalCode)
-		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "Postal Code", o.PostalCode, mPostal, &diffs)
-	}
 
-	// 6. Push metrics
-	totalChecked := len(orders)
-	ordersWithDiff := make(map[string]bool)
-	for _, d := range diffs {
-		ordersWithDiff[d.OrderNumber] = true
-	}
-	discrepancyCount := len(ordersWithDiff)
-	successRate := 100.0
-	if totalChecked > 0 {
-		successRate = float64(totalChecked-discrepancyCount) / float64(totalChecked) * 100.0
-	}
+		// Anggap kode pos "0" sama dengan ""
+		if mPostal == "0" {
+			mPostal = ""
+		}
 
-	pushMetrics(ctx, pushURL, totalChecked, discrepancyCount, successRate)
+		catPostal := o.PostalCode
+		if catPostal == "0" {
+			catPostal = ""
+		}
+
+		compare(o.OrderNumber, o.OrderReference, mOrder.OrderID, "Postal Code", catPostal, mPostal, &diffs)
+	}
 
 	if len(diffs) == 0 {
-		return "Success: No address discrepancies found between XMS Catalyst & Voila UF.", nil
+		return "", nil
 	}
 
 	return formatMarkdown(diffs), nil
@@ -276,43 +264,6 @@ func extractDBName(uri string) string {
 		return "voila" // fallback
 	}
 	return dbPart
-}
-
-func pushMetrics(ctx context.Context, url string, totalChecked int, count int, rate float64) {
-	if url == "" {
-		return
-	}
-
-	payload := fmt.Sprintf(
-		"order_address_sync_total_checked %d\n"+
-			"order_address_sync_discrepancy_count %d\n"+
-			"order_address_sync_success_rate %f\n",
-		totalChecked, count, rate,
-	)
-
-	fmt.Printf("[DEBUG] Prometheus payload: %s\n", payload)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[ERROR] failed to create prometheus request: %v\n", err)
-		return
-	}
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[WARN] failed to push metrics to prometheus: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		var body interface{}
-		json.NewDecoder(resp.Body).Decode(&body)
-		fmt.Fprintf(os.Stderr, "[WARN] prometheus pushgateway returned status %d: %v\n", resp.StatusCode, body)
-	} else {
-		fmt.Println("[DEBUG] successfully pushed metrics to prometheus")
-	}
 }
 
 func connectDB(dsn string) (*gorm.DB, error) {
