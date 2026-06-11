@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
+
 	inner "windmill/point/point-completed-order"
 
 	"github.com/joho/godotenv"
@@ -16,11 +16,8 @@ func main() {
 	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
 	voilaAccountDSN := os.Getenv("VOILA_ACCOUNT_DSN")
 
-	orderIDStr := os.Getenv("ORDER_ID")
-	orderID, _ := strconv.Atoi(orderIDStr)
-
 	// Call the Main function exported by the 'inner' package
-	res, err := inner.Main(xmsCatalystDSN, voilaAccountDSN, orderID)
+	res, err := inner.Main(xmsCatalystDSN, voilaAccountDSN)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return
