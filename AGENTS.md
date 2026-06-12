@@ -8,85 +8,80 @@
 
 ## Project Nature
 
-This is a **collection of standalone Windmill scripts** — not a traditional app or service.
-Each script detects discrepancies (stock, order, point, product, voucher) between XMS systems
-by querying multiple databases and emitting Mattermost-compatible Markdown reports.
+Collection of **16 standalone Windmill scripts** (no shared lib, no tests, no CI).
+Each detects discrepancies between XMS systems and emits Mattermost Markdown (or `.xlsx`).
+Each tool is self-contained with copy-pasted helpers — never assume a shared utility exists.
 
-There is **no shared library**, no test suite, no CI pipeline, and no production deployment.
-Each tool is self-contained with copy-pasted helper functions.
-
-## Dual-Layer Entrypoint Pattern
-
-Every tool follows this structure:
+## Entrypoint Pattern
 
 ```
-<domain>/<tool-name>/main.go         # package inner — exports Main(...) for Windmill platform
-<domain>/<tool-name>/cmd/main.go     # package main   — local runner (loads .env via godotenv)
+<domain>/<tool>/main.go       # package inner — exports Main(...) for Windmill platform
+<domain>/<tool>/cmd/main.go   # package main   — local runner (loads .env via godotenv)
 ```
 
-- To **run locally**: `go run ./<domain>/<tool-name>/cmd`
-- The Windmill platform calls the `inner.Main()` function directly, passing resource-path strings
-  (e.g. `u/sucahyo/catalyst_uam_postgresql_prod`) that get resolved at runtime via `wmill.GetResource()`.
+Run locally: `go run ./<domain>/<tool>/cmd`
 
-## Running Scripts
+The Windmill platform calls `inner.Main()` directly, passing resource-path strings
+(e.g. `u/sucahyo/catalyst_uam_postgresql_prod`) resolved at runtime via `wmill.GetResource()`.
+
+## Running Locally
 
 ```bash
-# 1. Copy env template (only .env.example is safe to read)
-cp .env.example .env
-# Fill in the actual DSN values in .env manually.
-
-# 2. Run any tool via its cmd entrypoint:
+cp .env.example .env      # only .env.example is safe to read
 go run ./stock-discrepancy/xmsc-xmsl/cmd
-go run ./stock-discrepancy/xmsl-reseller/cmd
-go run ./stock-discrepancy/xmsl-uf/cmd
+go run ./brand/cmd
 go run ./courier/cmd
-go run ./order/fulfillment-discrepancy/cmd
-go run ./order/address-discrepancy/xmsc-uf/cmd
-go run ./order/status-discrepancy/xmsc-uf/cmd
-go run ./order/status-discrepancy/xmsc-uf-excel/cmd
-go run ./point/point-completed-order/cmd
-go run ./point/point-missing-earn-sla/cmd
-go run ./point/point-redeem-not-deducted/cmd
-go run ./point/point-redeem-refund/cmd
-go run ./product/status/xmsc-uf/cmd
-go run ./user/inactive-user/cmd
 go run ./voucher/missing_voucher_usage_orders/cmd
 ```
 
-## DSN Resolution Pattern (in every tool)
+| Domain | Tools |
+|---|---|
+| `stock-discrepancy/` | `xmsc-xmsl`, `xmsl-reseller`, `xmsl-uf` |
+| `order/` | `fulfillment-discrepancy`, `address-discrepancy/xmsc-uf`, `status-discrepancy/xmsc-uf`, `status-discrepancy/xmsc-uf-excel` |
+| `point/` | `point-completed-order`, `point-missing-earn-sla`, `point-redeem-not-deducted`, `point-redeem-refund` |
+| others | `product/status/xmsc-uf`, `user/inactive-user`, `courier`, `brand`, `voucher/missing_voucher_usage_orders` |
 
-Each tool's resolver accepts either:
-- A **direct DSN** (`postgres://...` or `host=...`) — used for local dev via `.env`
-- A **Windmill resource path** (`u/username/resource_name`) — resolved by the Windmill platform at runtime
+## DSN Resolution
 
-When a resource path fails to resolve, the function falls back to a hardcoded default resource path.
+Every tool's resolver accepts either a **direct DSN** (local dev via `.env`) or a **Windmill resource path**
+(`u/username/resource_name`). Unresolvable paths fall back to a hardcoded default in the source.
 
-## Key Environment Variables
+## Environment Variables
 
-`.env.example` only defines 3; other tools reference additional variables. Agents should never read
-`.env` directly — use grep on `.env.example` or source code to discover required env vars:
+`.env.example` defines only 3. Never read `.env` directly — grep on source code or `.env.example`:
 
 | Variable | Used by |
 |---|---|
 | `XMS_CATALYST_VOILA_DSN` | Most tools (Catalyst PostgreSQL, `search_path=voila`) |
-| `XMS_LEGACY_DSN` | stock-discrepancy/xmsc-xmsl, xmsl-reseller, courier |
-| `RESELLER_DSN` | stock-discrepancy/xmsl-reseller |
-| `VOILA_SHIPMENT_DSN` | courier |
-| `PROM_PUSHGATEWAY_URL` | stock-discrepancy/xmsc-xmsl, order/fulfillment-discrepancy |
-| `ES_USERNAME`, `ES_PASSWORD` | product/status/xmsc-uf, stock-discrepancy/xmsl-uf |
-| `VAULT_ADDR`, `VAULT_GITHUB_TOKEN`, `VAULT_PATH` | stock-discrepancy/xmsl-uf, product/status/xmsc-uf |
+| `XMS_CATALYST_UAM_DSN` | `user/inactive-user` |
+| `XMS_CATALYST_JAMTANGAN_DSN` | `user/inactive-user` |
+| `XMS_LEGACY_DSN` | `stock-discrepancy/xmsc-xmsl`, `xmsl-reseller`, `courier` |
+| `RESELLER_DSN` | `stock-discrepancy/xmsl-reseller` |
+| `VOILA_SHIPMENT_DSN` | `courier` |
+| `VOILA_VOUCHER_DSN` | `voucher/missing_voucher_usage_orders` |
+| `VOILA_ACCOUNT_DSN` | `point/point-completed-order` |
+| `VOILA_UF_MONGO_URI` | `order/address-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf-excel` |
+| `ES_URL` / `ES_USERNAME` / `ES_PASSWORD` | `product/status/xmsc-uf`, `stock-discrepancy/xmsl-uf` |
+| `VAULT_ADDR` / `VAULT_GITHUB_TOKEN` / `VAULT_PATH` | `stock-discrepancy/xmsl-uf`, `product/status/xmsc-uf` |
+| `PROM_PUSHGATEWAY_URL` | `stock-discrepancy/xmsc-xmsl`, `order/fulfillment-discrepancy` |
+| `TARGET_EMAIL` | `user/inactive-user` (test email for dry-run-like local use) |
+
+`Main()` signatures and required env vars vary per tool — read the relevant `cmd/main.go` to see exactly what it expects at runtime.
 
 ## Gotchas
 
-- **Root `cmd` and `main` are stale Mach-O binaries**, not source directories. Ignore them.
-- **`vendor/` is tracked in git** despite `.gitignore` listing `vendor/`. Do not delete it.
-- **No tests exist** — `go test ./...` will find nothing. Don't try to run tests.
-- **No CI exists** — there is no `.github/`, Dockerfile, or pipeline config.
-- **The module name is `windmill`** (not the full repo path). Imports use `windmill/...` as prefix.
-- **Database `search_path=voila`** is required in most Catalyst DSNs — omitting it queries the wrong schema.
-- **dblink** is used extensively in `point/` tools and `stock-discrepancy/xmsl-reseller` to query cross-database from Catalyst.
-- **MongoDB** (`go.mongodb.org/mongo-driver`) is used in `order/` tools for Voila UF comparisons.
-- **Elasticsearch** (raw HTTP via Vault credentials) is used in `product/status/xmsc-uf` and `stock-discrepancy/xmsl-uf`.
-- **Excel export**: `order/status-discrepancy/xmsc-uf-excel` outputs `.xlsx` via `excelize/v2` instead of Markdown.
-- **The `user/inactive-user` tool is a write operation** — it updates user status to INACTIVE across 3 databases. Review carefully before running.
-- **Prometheus Pushgateway** is optional — tools that push metrics silently skip if the URL is empty.
+- **Root `cmd` and `main` are stale Mach-O binaries** — never treat them as source dirs.
+- **`vendor/` is tracked in git** despite `.gitignore` listing it. Do not delete.
+- **Module name is `windmill`** — imports use `windmill/...` as prefix.
+- **No tests** — `go test ./...` returns nothing.
+- **`brand/main.go` uses `package inner`** with the standard `Main(...)` export, same as every other tool (despite being flat in `brand/`).
+- **Naming inconsistency**: most tools use kebab-case (`xmsc-xmsl`), but `voucher/missing_voucher_usage_orders` uses snake_case.
+- **`search_path=voila`** required in most Catalyst DSNs — wrong schema otherwise.
+- **`dblink`** is used in `point/` tools and `stock-discrepancy/xmsl-reseller` for cross-database queries from Catalyst.
+- **MongoDB** (`go.mongodb.org/mongo-driver`) in `order/` tools for Voila UF comparisons.
+- **Elasticsearch** (raw HTTP via Vault) in `product/status/xmsc-uf` and `stock-discrepancy/xmsl-uf`.
+- **Excel export**: `order/status-discrepancy/xmsc-uf-excel` writes `.xlsx` via `excelize/v2`, not Markdown.
+- **`user/inactive-user` is a write operation** — updates users to INACTIVE across 3 databases. Review carefully.
+- **Prometheus Pushgateway** is optional — silently skipped if URL is empty.
+- **`loadEnv` pattern**: most `cmd/main.go` files try `godotenv.Load()` at multiple depths (`.`, `../`, `../../`, etc.). `user/inactive-user/cmd` uses a single fixed path `"../../.env"` instead.
+- **Makefile** exists for Grafana/Loki stack (`make up/down`) and running `stock-discrepancy/xmsc-xmsl` with log capture (`make run`). Not needed for core tool usage.

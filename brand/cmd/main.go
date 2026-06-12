@@ -1,0 +1,35 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	inner "windmill/brand"
+
+	"github.com/joho/godotenv"
+)
+
+func main() {
+	loadEnv()
+
+	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
+	xmsLegacyDSN := os.Getenv("XMS_LEGACY_DSN")
+
+	if xmsCatalystDSN == "" || xmsLegacyDSN == "" {
+		fmt.Println("Note: XMS_CATALYST_VOILA_DSN or XMS_LEGACY_DSN missing in environment.")
+		return
+	}
+
+	res, err := inner.Main(xmsCatalystDSN, xmsLegacyDSN)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		return
+	}
+	fmt.Println(res)
+}
+
+func loadEnv() {
+	_ = godotenv.Load()
+	_ = godotenv.Load("../.env")
+	_ = godotenv.Load("../../.env")
+	_ = godotenv.Load("../../../.env")
+}
