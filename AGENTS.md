@@ -8,7 +8,7 @@
 
 ## Project Nature
 
-Collection of **16 standalone Windmill scripts** (no shared lib, no tests, no CI).
+Collection of **17 standalone Windmill scripts** (no shared lib, no tests, no CI).
 Each detects discrepancies between XMS systems and emits Mattermost Markdown (or `.xlsx`).
 Each tool is self-contained with copy-pasted helpers — never assume a shared utility exists.
 
@@ -37,9 +37,10 @@ go run ./voucher/missing_voucher_usage_orders/cmd
 | Domain | Tools |
 |---|---|
 | `stock-discrepancy/` | `xmsc-xmsl`, `xmsl-reseller`, `xmsl-uf` |
+| `office/` | `office` |
 | `order/` | `fulfillment-discrepancy`, `address-discrepancy/xmsc-uf`, `status-discrepancy/xmsc-uf`, `status-discrepancy/xmsc-uf-excel` |
 | `point/` | `point-completed-order`, `point-missing-earn-sla`, `point-redeem-not-deducted`, `point-redeem-refund` |
-| others | `product/status/xmsc-uf`, `user/inactive-user`, `courier`, `brand`, `voucher/missing_voucher_usage_orders` |
+| others | `product/status/xmsc-uf`, `user/inactive-user`, `courier`, `brand`, `voucher/missing_voucher_usage_orders`, `office` |
 
 ## DSN Resolution
 
@@ -48,19 +49,19 @@ Every tool's resolver accepts either a **direct DSN** (local dev via `.env`) or 
 
 ## Environment Variables
 
-`.env.example` defines only 3. Never read `.env` directly — grep on source code or `.env.example`:
+`.env.example` defines 4 variables. Never read `.env` directly — grep on source code or `.env.example`:
 
 | Variable | Used by |
 |---|---|
-| `XMS_CATALYST_VOILA_DSN` | Most tools (Catalyst PostgreSQL, `search_path=voila`) |
+| `XMS_CATALYST_VOILA_DSN` | Most tools (Catalyst PostgreSQL, `search_path=voila`), `office` |
 | `XMS_CATALYST_UAM_DSN` | `user/inactive-user` |
 | `XMS_CATALYST_JAMTANGAN_DSN` | `user/inactive-user` |
-| `XMS_LEGACY_DSN` | `stock-discrepancy/xmsc-xmsl`, `xmsl-reseller`, `courier` |
+| `XMS_LEGACY_DSN` | `stock-discrepancy/xmsc-xmsl`, `xmsl-reseller`, `courier`, `office` |
 | `RESELLER_DSN` | `stock-discrepancy/xmsl-reseller` |
 | `VOILA_SHIPMENT_DSN` | `courier` |
 | `VOILA_VOUCHER_DSN` | `voucher/missing_voucher_usage_orders` |
 | `VOILA_ACCOUNT_DSN` | `point/point-completed-order` |
-| `VOILA_UF_MONGO_URI` | `order/address-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf-excel` |
+| `VOILA_UF_MONGO_URI` | `order/address-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf`, `order/status-discrepancy/xmsc-uf-excel`, `office` |
 | `ES_URL` / `ES_USERNAME` / `ES_PASSWORD` | `product/status/xmsc-uf`, `stock-discrepancy/xmsl-uf` |
 | `VAULT_ADDR` / `VAULT_GITHUB_TOKEN` / `VAULT_PATH` | `stock-discrepancy/xmsl-uf`, `product/status/xmsc-uf` |
 | `PROM_PUSHGATEWAY_URL` | `stock-discrepancy/xmsc-xmsl`, `order/fulfillment-discrepancy` |
