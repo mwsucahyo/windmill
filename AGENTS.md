@@ -57,7 +57,7 @@ hardcoded default in source.
 | Domain | Path |
 |---|---|
 | `stock-discrepancy/` | `xmsc-xmsl`, `xmsl-reseller`, `xmsl-uf` |
-| `order/` | `fulfillment-discrepancy`, `order-not-sync` |
+| `order/` | `fulfillment-discrepancy`, `order-not-sync`, `suspicious-order` |
 | `order/address-discrepancy/` | `xmsc-uf` |
 | `order/status-discrepancy/` | `xmsc-uf`, `xmsc-uf-excel` |
 | `point/` | `point-completed-order`, `point-missing-earn-sla`, `point-redeem-not-deducted`, `point-redeem-refund` |
