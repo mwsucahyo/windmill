@@ -67,9 +67,11 @@ func (r *Repository) QueryOrders(startDate, endDate, orderNumbers string) ([]Ord
 	if endDate != "" {
 		conditions = append(conditions, fmt.Sprintf("o.created_at < '%s'::timestamp + INTERVAL '1 DAY'", endDate))
 	}
+	conditions = append(conditions, "o.is_deleted = false")
+	conditions = append(conditions, "o.deleted_at IS NULL")
 	conditions = append(conditions, "o.order_version = 1")
 	conditions = append(conditions, "o.status_id = 5")
-	conditions = append(conditions, "o.completed_at <= NOW() - INTERVAL '5 days'")
+	conditions = append(conditions, "o.completed_at + INTERVAL '5 days' < NOW()") // exclude orders completed more than 5 days ago
 
 	args := []interface{}{}
 	if orderNumbers != "" {
@@ -110,7 +112,7 @@ func (r *Repository) QueryOrderItems(orderIDs []int64) (map[int64][]OrderItem, e
 			   oi.sku_universal, oi.product_image,
 			   oi.is_add_on, oi.is_bundling, oi.is_couple, oi.is_pre_order
 		FROM %s.tr_order_item oi
-		WHERE oi.order_id IN (%s) AND oi.is_deleted = false
+		WHERE oi.order_id IN (%s) AND oi.is_deleted = false AND oi.deleted_at IS NULL
 		ORDER BY oi.id
 	`, r.Schema, joinIDs(orderIDs))
 

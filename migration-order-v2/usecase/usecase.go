@@ -173,7 +173,7 @@ func (u *Usecase) processOrder(order *repository.Order, fulfillments []repositor
 		u.saveLog(r, ffCase, ffIDs, "HOME_DELIVERY")
 
 	case "UPDATE_FF":
-		if err := u.processUpdateFulfillments(tx, order, fulfillments); err != nil {
+		if err := u.processUpdateFulfillments(tx, order, fulfillments, items); err != nil {
 			tx.Rollback()
 			r.Action = "UPDATE FF"
 			r.Status = "ERROR"
@@ -271,7 +271,13 @@ func (u *Usecase) processCarryOutCreate(tx *gorm.DB, order *repository.Order,
 	if err != nil {
 		return 0, err
 	}
-	if err := u.repo.UpdateFulfillmentItemCodes(tx, ffID, order.ID, items, productIDs); err != nil {
+	productMap := make(map[int64]int64, len(items))
+	for i, item := range items {
+		if i < len(productIDs) {
+			productMap[item.ID] = productIDs[i]
+		}
+	}
+	if err := u.matchItemCodes(tx, ffID, order.ID, items, productMap); err != nil {
 		return 0, err
 	}
 
@@ -314,7 +320,13 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *repository.Order
 	if err != nil {
 		return 0, err
 	}
-	if err := u.repo.UpdateFulfillmentItemCodes(tx, ffID, order.ID, items, productIDs); err != nil {
+	productMap := make(map[int64]int64, len(items))
+	for i, item := range items {
+		if i < len(productIDs) {
+			productMap[item.ID] = productIDs[i]
+		}
+	}
+	if err := u.matchItemCodes(tx, ffID, order.ID, items, productMap); err != nil {
 		return 0, err
 	}
 
@@ -324,21 +336,32 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *repository.Order
 // ─── Process CASE 3 ────────────────────────────────────────────────────────
 
 func (u *Usecase) processUpdateFulfillments(tx *gorm.DB, order *repository.Order,
-	fulfillments []repository.Fulfillment) error {
+	fulfillments []repository.Fulfillment, items []repository.OrderItem) error {
 
 	for _, f := range fulfillments {
 		if err := u.updateFulfillmentByMethod(tx, order, &f); err != nil {
 			return fmt.Errorf("update fulfillment %d failed: %w", f.ID, err)
+		}
+		// Fill order_item_id for existing fulfillment products
+		if err := u.repo.UpdateFulfillmentProductOrderItemID(tx, f.ID, items); err != nil {
+			return fmt.Errorf("update fulfillment product order_item_id for ff %d failed: %w", f.ID, err)
+		}
+		// Fill fulfillment_id and fulfillment_product_id in item codes
+		products, err := u.repo.QueryFulfillmentProducts(tx, f.ID)
+		if err != nil {
+			return fmt.Errorf("query products for ff %d failed: %w", f.ID, err)
+		}
+		productMap := buildProductMap(products)
+		if err := u.matchItemCodes(tx, f.ID, order.ID, items, productMap); err != nil {
+			return fmt.Errorf("match item codes for ff %d failed: %w", f.ID, err)
 		}
 	}
 	return nil
 }
 
 func (u *Usecase) updateFulfillmentByMethod(tx *gorm.DB, order *repository.Order, f *repository.Fulfillment) error {
-	method := ""
-	if f.ProcessingMethod != nil {
-		method = *f.ProcessingMethod
-	}
+	// Derive processing method from order's shipping method
+	var method string = order.ShippingMethod
 
 	isReplaced := false
 	if f.IsReplaced != nil {
@@ -358,7 +381,7 @@ func (u *Usecase) updateFulfillmentByMethod(tx *gorm.DB, order *repository.Order
 	switch method {
 	case "CARRY_OUT":
 		return u.repo.UpdateFulfillmentCarryOut(tx, f.ID, processingStatusID, isVisible)
-	case "HOME_DELIVERY":
+	case "HOME_DELIVERY", "SHIPPING":
 		return u.repo.UpdateFulfillmentHomeDelivery(tx, f.ID, processingStatusID, isVisible)
 	case "CONSIGNMENT":
 		return u.repo.UpdateFulfillmentConsignment(tx, f.ID, processingStatusID, isVisible)
@@ -371,7 +394,69 @@ func (u *Usecase) updateFulfillmentByMethod(tx *gorm.DB, order *repository.Order
 	}
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// ─── Match Item Codes Helper ───────────────────────────────────────────────
+
+func (u *Usecase) matchItemCodes(tx *gorm.DB, fulfillmentID, orderID int64, items []repository.OrderItem, productMap map[int64]int64) error {
+	// Try query by fulfillment_id first (UPDATE case), fallback to order_id (CREATE case)
+	codes, err := u.repo.QueryItemCodesByFulfillment(tx, fulfillmentID)
+	if err != nil {
+		return fmt.Errorf("query item codes for ff %d failed: %w", fulfillmentID, err)
+	}
+	if len(codes) == 0 {
+		codes, err = u.repo.QueryUnmatchedItemCodes(tx, orderID)
+		if err != nil {
+			return fmt.Errorf("query unmatched item codes failed: %w", err)
+		}
+	}
+
+	used := make(map[int64]bool)
+	for _, item := range items {
+		fpID, ok := productMap[item.ID]
+		if !ok {
+			continue
+		}
+
+		var matchID int64
+		var matchFfFilled bool
+		for i := range codes {
+			if used[codes[i].ID] {
+				continue
+			}
+			if codes[i].OrderItemID == item.ID || codes[i].VariantID == item.VariantID {
+				matchID = codes[i].ID
+				matchFfFilled = codes[i].FulfillmentID != 0
+				used[codes[i].ID] = true
+				break
+			}
+		}
+		if matchID == 0 {
+			continue
+		}
+
+		if matchFfFilled {
+			if err := u.repo.UpdateItemCodeFulfillmentProduct(tx, matchID, fpID, orderID); err != nil {
+				return fmt.Errorf("update item code %d failed: %w", matchID, err)
+			}
+		} else {
+			if err := u.repo.UpdateItemCodeFulfillment(tx, matchID, fulfillmentID, fpID, orderID); err != nil {
+				return fmt.Errorf("update item code %d failed: %w", matchID, err)
+			}
+		}
+	}
+	return nil
+}
+
+func buildProductMap(products []repository.FulfillmentProductRow) map[int64]int64 {
+	m := make(map[int64]int64, len(products))
+	for _, p := range products {
+		if p.OrderItemID > 0 {
+			m[p.OrderItemID] = p.ID
+		}
+	}
+	return m
+}
+
+// ─── determineIsVisible ────────────────────────────────────────────────────
 
 func (u *Usecase) saveLog(r MigrationResult, ffCase string, fulfillmentIDs []int64, processingMethod string) {
 	if u.mongoRepo == nil {
@@ -409,7 +494,7 @@ func determineIsVisible(processingMethod, shippingMethod string) bool {
 	switch processingMethod {
 	case "CONSIGNMENT", "CARRY_OUT", "PRE_ORDER":
 		return false
-	case "HOME_DELIVERY":
+	case "HOME_DELIVERY", "SHIPPING":
 		return true
 	case "PICKUP_IN_STORE":
 		return shippingMethod != "OTHER_STORE"

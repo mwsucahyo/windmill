@@ -32,7 +32,7 @@ func (r *Repository) QueryFulfillments(orderIDs []int64) (map[int64][]Fulfillmen
 		SELECT f.id, f.order_id, f.processing_status_id,
 			   f.processing_method::text, f.is_replaced
 		FROM %s.tr_fulfillment f
-		WHERE f.is_replaced = false AND f.order_id IN (%s)
+		WHERE f.is_replaced = false AND f.deleted_at IS NULL AND f.order_id IN (%s)
 		ORDER BY f.id
 	`, r.Schema, joinIDs(orderIDs))
 
@@ -156,27 +156,83 @@ func (r *Repository) InsertFulfillmentProducts(tx *gorm.DB, fulfillmentID int64,
 	return productIDs, nil
 }
 
-func (r *Repository) UpdateFulfillmentItemCodes(tx *gorm.DB, fulfillmentID, orderID int64,
-	items []OrderItem, productIDs []int64) error {
-
-	for i, item := range items {
-		fpID := int64(0)
-		if i < len(productIDs) {
-			fpID = productIDs[i]
-		}
-
-		err := tx.Exec(fmt.Sprintf(`
-			UPDATE %s.tr_fulfillment_item_code
-			SET fulfillment_id = ?, fulfillment_product_id = ?, order_id = ?
-			WHERE order_item_id = ? AND (fulfillment_id IS NULL OR fulfillment_id = 0)
+func (r *Repository) UpdateFulfillmentProductOrderItemID(tx *gorm.DB, fulfillmentID int64, items []OrderItem) error {
+	for _, item := range items {
+		res := tx.Exec(fmt.Sprintf(`
+			UPDATE %s.tr_fulfillment_product
+			SET order_item_id = ?
+			WHERE fulfillment_id = ? AND variant_id = ? AND (order_item_id IS NULL OR order_item_id = 0)
 		`, r.Schema),
-			fulfillmentID, fpID, orderID, item.ID,
-		).Error
-		if err != nil {
-			return fmt.Errorf("update fulfillment item code for item %d failed: %w", item.ID, err)
+			item.ID, fulfillmentID, item.VariantID,
+		)
+		if res.Error != nil {
+			return fmt.Errorf("update fulfillment product order_item_id for variant %d failed: %w", item.VariantID, res.Error)
 		}
+		fmt.Printf("[DEBUG] UpdateFulfillmentProductOrderItemID: ff=%d, item=%d, variant=%d, rowsAffected=%d\n",
+			fulfillmentID, item.ID, item.VariantID, res.RowsAffected)
 	}
 	return nil
+}
+
+type FulfillmentProductRow struct {
+	ID          int64
+	VariantID   int32
+	OrderItemID int64
+}
+
+func (r *Repository) QueryFulfillmentProducts(tx *gorm.DB, fulfillmentID int64) ([]FulfillmentProductRow, error) {
+	var rows []FulfillmentProductRow
+	err := tx.Raw(fmt.Sprintf(`
+		SELECT id, variant_id, COALESCE(order_item_id, 0) AS order_item_id
+		FROM %s.tr_fulfillment_product
+		WHERE fulfillment_id = ? ORDER BY id
+	`, r.Schema), fulfillmentID).Scan(&rows).Error
+	return rows, err
+}
+
+type ItemCodeRow struct {
+	ID            int64
+	VariantID     int32
+	OrderItemID   int64
+	FulfillmentID int64
+}
+
+func (r *Repository) QueryItemCodesByFulfillment(tx *gorm.DB, fulfillmentID int64) ([]ItemCodeRow, error) {
+	var rows []ItemCodeRow
+	err := tx.Raw(fmt.Sprintf(`
+		SELECT id, variant_id, COALESCE(order_item_id, 0) AS order_item_id, fulfillment_id
+		FROM %s.tr_fulfillment_item_code
+		WHERE fulfillment_id = ?
+		ORDER BY id
+	`, r.Schema), fulfillmentID).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *Repository) QueryUnmatchedItemCodes(tx *gorm.DB, orderID int64) ([]ItemCodeRow, error) {
+	var rows []ItemCodeRow
+	err := tx.Raw(fmt.Sprintf(`
+		SELECT id, variant_id, COALESCE(order_item_id, 0) AS order_item_id, 0 AS fulfillment_id
+		FROM %s.tr_fulfillment_item_code
+		WHERE order_id = ? AND fulfillment_id IS NULL
+		ORDER BY id
+	`, r.Schema), orderID).Scan(&rows).Error
+	return rows, err
+}
+
+func (r *Repository) UpdateItemCodeFulfillment(tx *gorm.DB, id, fulfillmentID, fpID, orderID int64) error {
+	return tx.Exec(fmt.Sprintf(`
+		UPDATE %s.tr_fulfillment_item_code
+		SET fulfillment_id = ?, fulfillment_product_id = ?, order_id = ?
+		WHERE id = ? AND fulfillment_id IS NULL
+	`, r.Schema), fulfillmentID, fpID, orderID, id).Error
+}
+
+func (r *Repository) UpdateItemCodeFulfillmentProduct(tx *gorm.DB, id, fpID, orderID int64) error {
+	return tx.Exec(fmt.Sprintf(`
+		UPDATE %s.tr_fulfillment_item_code
+		SET fulfillment_product_id = ?, order_id = ?
+		WHERE id = ?
+	`, r.Schema), fpID, orderID, id).Error
 }
 
 // ─── Update per Processing Method ──────────────────────────────────────────
