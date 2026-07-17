@@ -97,6 +97,15 @@ type FulfillmentInsertData struct {
 	ProcessingMethod   string
 	ProcessingStatusID int32
 	IsVisible          bool
+	AwbNumber          string
+	IsDropship         bool
+	CourierServiceID   int32
+	InsuranceFee       float64
+	IsHasInsurance     bool
+	ShippingFee        float64
+	OrderShippingID    int64
+	CourierServiceCode string
+	AwbSource          *string
 }
 
 func (r *Repository) InsertFulfillment(tx *gorm.DB, o *Order, code string, data *FulfillmentInsertData) (int64, error) {
@@ -104,9 +113,15 @@ func (r *Repository) InsertFulfillment(tx *gorm.DB, o *Order, code string, data 
 		INSERT INTO %s.tr_fulfillment
 			(code, order_id, channel, store_name, office_id,
 			 payment_status, payment_date, processing_method, processing_status_id,
-			 is_visible, order_number, order_reference, expired_at, created_at)
+			 is_visible, order_number, order_reference, awb_number, is_dropship,
+			 courier_service_id, insurance_fee, is_has_insurance, shipping_fee,
+			 order_shipping_id, courier_service_code, awb_source,
+			 expired_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?::text::%s.processing_method_enum,
-				?, ?, ?, ?, NOW() + INTERVAL '1 DAY', NOW())
+				?, ?, ?, ?, ?, ?,
+				?, ?, ?, ?,
+				?, ?, ?,
+				NOW() + INTERVAL '1 DAY', NOW(), NOW())
 		RETURNING id
 	`, r.Schema, r.Schema)
 
@@ -116,6 +131,9 @@ func (r *Repository) InsertFulfillment(tx *gorm.DB, o *Order, code string, data 
 		data.OfficeID, data.PaymentStatus, data.PaymentDate,
 		data.ProcessingMethod, data.ProcessingStatusID,
 		data.IsVisible, o.OrderNumber, o.ReferenceNumber,
+		data.AwbNumber, data.IsDropship,
+		data.CourierServiceID, data.InsuranceFee, data.IsHasInsurance, data.ShippingFee,
+		data.OrderShippingID, data.CourierServiceCode, data.AwbSource,
 	).Scan(&id).Error
 	if err != nil {
 		return 0, err
@@ -190,6 +208,62 @@ func (r *Repository) QueryFulfillmentProducts(tx *gorm.DB, fulfillmentID int64) 
 	return rows, err
 }
 
+func (r *Repository) QueryCoveredVariants(tx *gorm.DB, orderID int64) (map[int64]bool, error) {
+	type fpRow struct {
+		OrderItemID int64
+		VariantID   int32
+	}
+	var rows []fpRow
+	err := tx.Raw(fmt.Sprintf(`
+		SELECT COALESCE(fp.order_item_id, 0) AS order_item_id, fp.variant_id
+		FROM %s.tr_fulfillment_product fp
+		JOIN %s.tr_fulfillment f ON f.id = fp.fulfillment_id
+		WHERE f.order_id = ? AND f.deleted_at IS NULL
+	`, r.Schema, r.Schema), orderID).Scan(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	covered := make(map[int64]bool)
+	variantQty := make(map[int32]int)
+
+	for _, r := range rows {
+		if r.OrderItemID > 0 {
+			covered[r.OrderItemID] = true
+		} else {
+			variantQty[r.VariantID]++
+		}
+	}
+
+	if len(variantQty) > 0 {
+		var totals []struct {
+			VariantID int32
+			Qty       int
+		}
+		tx.Raw(fmt.Sprintf(`
+			SELECT variant_id, SUM(qty)::int AS qty
+			FROM %s.tr_order_item
+			WHERE order_id = ? AND is_deleted = false AND deleted_at IS NULL
+			GROUP BY variant_id
+		`, r.Schema), orderID).Scan(&totals)
+
+		for _, t := range totals {
+			if variantQty[t.VariantID] >= t.Qty {
+				var ids []int64
+				tx.Raw(fmt.Sprintf(`
+					SELECT id FROM %s.tr_order_item
+					WHERE order_id = ? AND variant_id = ? AND is_deleted = false AND deleted_at IS NULL
+				`, r.Schema), orderID, t.VariantID).Pluck("id", &ids)
+				for _, id := range ids {
+					covered[id] = true
+				}
+			}
+		}
+	}
+
+	return covered, nil
+}
+
 type ItemCodeRow struct {
 	ID            int64
 	VariantID     int32
@@ -219,20 +293,28 @@ func (r *Repository) QueryUnmatchedItemCodes(tx *gorm.DB, orderID int64) ([]Item
 	return rows, err
 }
 
-func (r *Repository) UpdateItemCodeFulfillment(tx *gorm.DB, id, fulfillmentID, fpID, orderID int64) error {
+func (r *Repository) UpdateItemCodeFulfillment(tx *gorm.DB, id, fulfillmentID, fpID, orderID, orderItemID int64) error {
 	return tx.Exec(fmt.Sprintf(`
 		UPDATE %s.tr_fulfillment_item_code
-		SET fulfillment_id = ?, fulfillment_product_id = ?, order_id = ?
+		SET fulfillment_id = ?, fulfillment_product_id = ?, order_id = ?, order_item_id = ?
 		WHERE id = ? AND fulfillment_id IS NULL
-	`, r.Schema), fulfillmentID, fpID, orderID, id).Error
+	`, r.Schema), fulfillmentID, fpID, orderID, orderItemID, id).Error
 }
 
-func (r *Repository) UpdateItemCodeFulfillmentProduct(tx *gorm.DB, id, fpID, orderID int64) error {
+func (r *Repository) UpdateItemCodeFulfillmentProduct(tx *gorm.DB, id, fpID, orderID, orderItemID int64) error {
 	return tx.Exec(fmt.Sprintf(`
 		UPDATE %s.tr_fulfillment_item_code
-		SET fulfillment_product_id = ?, order_id = ?
+		SET fulfillment_product_id = ?, order_id = ?, order_item_id = ?
 		WHERE id = ?
-	`, r.Schema), fpID, orderID, id).Error
+	`, r.Schema), fpID, orderID, orderItemID, id).Error
+}
+
+func (r *Repository) UpdateItemCodeValue(tx *gorm.DB, id int64, itemCode string) error {
+	return tx.Exec(fmt.Sprintf(`
+		UPDATE %s.tr_fulfillment_item_code
+		SET item_code = ?
+		WHERE id = ?
+	`, r.Schema), itemCode, id).Error
 }
 
 // ─── Update per Processing Method ──────────────────────────────────────────

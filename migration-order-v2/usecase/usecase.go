@@ -86,16 +86,6 @@ func (u *Usecase) ProcessOrders(startDate, endDate, orderNumbers string) ([]Migr
 
 // ─── Decision ──────────────────────────────────────────────────────────────
 
-func (u *Usecase) determineCase(o *repository.Order, fulfillments []repository.Fulfillment) string {
-	if len(fulfillments) > 0 {
-		return "UPDATE_FF"
-	}
-	if o.ShippingMethod == "CARRY_OUT" {
-		return "CREATE_CARRY_OUT"
-	}
-	return "CREATE_HOME_DELIVERY"
-}
-
 func (u *Usecase) isRejectedNoFF(o *repository.Order) bool {
 	return o.StatusID == 6 || o.StatusID == 4 || o.StatusID == 8 || o.StatusID == 1
 }
@@ -116,14 +106,9 @@ func (u *Usecase) processOrder(order *repository.Order, fulfillments []repositor
 
 	tx := u.repo.DB.Begin()
 
-	// Determine case
-	ffCase := u.determineCase(order, fulfillments)
-
-	// Resolve statuses (same for all cases)
+	// Update order (always happens for all cases)
 	statusIDs := []int32{order.StatusID}
 	subStatusIDs := []int32{ProcessingStatusCompleted}
-
-	// Update order once for all cases
 	if err := u.repo.UpdateOrder(tx, order.ID, statusIDs, subStatusIDs); err != nil {
 		tx.Rollback()
 		r.Action = "UPDATE ORDER"
@@ -132,69 +117,86 @@ func (u *Usecase) processOrder(order *repository.Order, fulfillments []repositor
 		return r
 	}
 
-	var ffID int64
-	var ffIDs []int64
+	var allFFIDs []int64
+	caseStr := ""
 
-	switch ffCase {
-	case "CREATE_CARRY_OUT":
-		id, err := u.processCarryOutCreate(tx, order, items, brandNames)
+	// ── 1. CREATE new fulfillment for uncovered items ──
+	coveredVariants, err := u.repo.QueryCoveredVariants(tx, order.ID)
+	if err != nil {
+		tx.Rollback()
+		r.Action = "CREATE FF"
+		r.Status = "ERROR"
+		r.Detail = fmt.Sprintf("query covered variants failed: %v", err)
+		return r
+	}
+
+	var uncoveredItems []repository.OrderItem
+	for _, item := range items {
+		if !coveredVariants[item.ID] {
+			uncoveredItems = append(uncoveredItems, item)
+		}
+	}
+
+	if len(uncoveredItems) > 0 {
+		var ffID int64
+		// Use first uncovered item to determine consign
+		isConsignOrder := uncoveredItems[0].IsConsign
+
+		if order.ShippingMethod == "CARRY_OUT" && !isConsignOrder {
+			ffID, err = u.processCarryOutCreate(tx, order, uncoveredItems, brandNames)
+			caseStr = "CREATE_CARRY_OUT"
+		} else if isConsignOrder {
+			ffID, err = u.processConsignCreate(tx, order, uncoveredItems, consign, brandNames)
+			caseStr = "CREATE_CONSIGN"
+		} else {
+			ffID, err = u.processHomeDeliveryCreate(tx, order, uncoveredItems, consign, brandNames)
+			caseStr = "CREATE_HOME_DELIVERY"
+		}
 		if err != nil {
 			tx.Rollback()
 			r.Action = "CREATE FF"
 			r.Status = "ERROR"
 			r.Detail = err.Error()
-			u.saveLog(r, ffCase, nil, "CARRY_OUT")
+			u.saveLog(r, caseStr, nil, "")
 			return r
 		}
-		ffID = id
-		ffIDs = []int64{ffID}
-		tx.Commit()
-		r.Action = "CREATE FF"
-		r.Status = "OK"
-		r.Detail = fmt.Sprintf("carry_out, %d items", len(items))
-		u.saveLog(r, ffCase, ffIDs, "CARRY_OUT")
+		allFFIDs = append(allFFIDs, ffID)
+	}
 
-	case "CREATE_HOME_DELIVERY":
-		id, err := u.processHomeDeliveryCreate(tx, order, items, consign, brandNames)
-		if err != nil {
-			tx.Rollback()
-			r.Action = "CREATE FF"
-			r.Status = "ERROR"
-			r.Detail = err.Error()
-			u.saveLog(r, ffCase, nil, "HOME_DELIVERY")
-			return r
-		}
-		ffID = id
-		ffIDs = []int64{ffID}
-		tx.Commit()
-		r.Action = "CREATE FF"
-		r.Status = "OK"
-		r.Detail = fmt.Sprintf("home_delivery, %d items", len(items))
-		u.saveLog(r, ffCase, ffIDs, "HOME_DELIVERY")
-
-	case "UPDATE_FF":
+	// ── 2. UPDATE existing fulfillments ──
+	if len(fulfillments) > 0 {
 		if err := u.processUpdateFulfillments(tx, order, fulfillments, items); err != nil {
 			tx.Rollback()
 			r.Action = "UPDATE FF"
 			r.Status = "ERROR"
 			r.Detail = err.Error()
-			u.saveLog(r, ffCase, nil, "")
+			u.saveLog(r, "UPDATE_FF", nil, "")
 			return r
 		}
 		for _, f := range fulfillments {
-			ffIDs = append(ffIDs, f.ID)
+			allFFIDs = append(allFFIDs, f.ID)
 		}
-		method := ""
-		if len(fulfillments) > 0 && fulfillments[0].ProcessingMethod != nil {
-			method = *fulfillments[0].ProcessingMethod
+		if caseStr == "" {
+			caseStr = "UPDATE_FF"
+		} else {
+			caseStr = "MIXED_" + caseStr
 		}
-		tx.Commit()
-		r.Action = "UPDATE FF"
-		r.Status = "OK"
-		r.Detail = fmt.Sprintf("%d fulfillment(s) updated", len(fulfillments))
-		u.saveLog(r, ffCase, ffIDs, method)
 	}
 
+	if len(allFFIDs) == 0 {
+		tx.Rollback()
+		r.Action = "SKIP"
+		r.Status = "SKIPPED"
+		r.Detail = "no items need fulfillment"
+		u.saveLog(r, "SKIP", nil, "")
+		return r
+	}
+
+	tx.Commit()
+	r.Action = caseStr
+	r.Status = "OK"
+	r.Detail = fmt.Sprintf("fulfillments: %v", allFFIDs)
+	u.saveLog(r, caseStr, allFFIDs, order.ShippingMethod)
 	return r
 }
 
@@ -252,6 +254,7 @@ func (u *Usecase) processCarryOutCreate(tx *gorm.DB, order *repository.Order,
 	}
 
 	storeName := u.repo.ResolveOfficeName(tx, order.OfficeID)
+	shipping := u.repo.QueryOrderShipping(tx, order.ID)
 
 	ffID, err := u.repo.InsertFulfillment(tx, order, code, &repository.FulfillmentInsertData{
 		Channel:            "OFFLINE",
@@ -262,6 +265,14 @@ func (u *Usecase) processCarryOutCreate(tx *gorm.DB, order *repository.Order,
 		ProcessingMethod:   "CARRY_OUT",
 		ProcessingStatusID: ProcessingStatusCompleted,
 		IsVisible:          false,
+		AwbNumber:          shipping.TrackingCode,
+		IsDropship:         shipping.DropshipName != "",
+		CourierServiceID:   shipping.CourierID,
+		InsuranceFee:       order.InsuranceFee,
+		IsHasInsurance:     order.InsuranceFee > 0,
+		ShippingFee:        order.ShippingFee,
+		OrderShippingID:    shipping.ID,
+		CourierServiceCode: shipping.CourierServiceCode,
 	})
 	if err != nil {
 		return 0, err
@@ -301,6 +312,7 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *repository.Order
 		officeID = consign.OfficeID
 		storeName = consign.StoreName
 	}
+	shipping := u.repo.QueryOrderShipping(tx, order.ID)
 
 	ffID, err := u.repo.InsertFulfillment(tx, order, code, &repository.FulfillmentInsertData{
 		Channel:            order.SalesChannelCode,
@@ -311,6 +323,14 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *repository.Order
 		ProcessingMethod:   "HOME_DELIVERY",
 		ProcessingStatusID: ProcessingStatusCompleted,
 		IsVisible:          false,
+		AwbNumber:          shipping.TrackingCode,
+		IsDropship:         shipping.DropshipName != "",
+		CourierServiceID:   shipping.CourierID,
+		InsuranceFee:       order.InsuranceFee,
+		IsHasInsurance:     order.InsuranceFee > 0,
+		ShippingFee:        order.ShippingFee,
+		OrderShippingID:    shipping.ID,
+		CourierServiceCode: shipping.CourierServiceCode,
 	})
 	if err != nil {
 		return 0, err
@@ -333,7 +353,80 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *repository.Order
 	return ffID, nil
 }
 
-// ─── Process CASE 3 ────────────────────────────────────────────────────────
+// ─── Process CONSIGN Create ─────────────────────────────────────────────────
+
+func (u *Usecase) processConsignCreate(tx *gorm.DB, order *repository.Order,
+	items []repository.OrderItem, consign *repository.ConsignmentData, brandNames map[int32]string) (int64, error) {
+
+	code, err := u.generateFulfillmentCode(tx, order)
+	if err != nil {
+		return 0, err
+	}
+
+	officeID := order.OfficeID
+	storeName := u.repo.ResolveOfficeName(tx, order.OfficeID)
+	if consign != nil {
+		officeID = consign.OfficeID
+		storeName = consign.StoreName
+	}
+	shipping := u.repo.QueryOrderShipping(tx, order.ID)
+	awbNumber := shipping.TrackingCode
+	if consign != nil && consign.AwbNumber != "" {
+		awbNumber = consign.AwbNumber
+	}
+	awbManual := "MANUAL"
+
+	ffID, err := u.repo.InsertFulfillment(tx, order, code, &repository.FulfillmentInsertData{
+		Channel:            order.SalesChannelCode,
+		StoreName:          storeName,
+		OfficeID:           officeID,
+		PaymentStatus:      order.PaymentProgress,
+		PaymentDate:        order.ProcessedAt,
+		ProcessingMethod:   "HOME_DELIVERY",
+		ProcessingStatusID: ProcessingStatusCompleted,
+		IsVisible:          false,
+		AwbNumber:          awbNumber,
+		IsDropship:         shipping.DropshipName != "",
+		CourierServiceID:   shipping.CourierID,
+		InsuranceFee:       order.InsuranceFee,
+		IsHasInsurance:     order.InsuranceFee > 0,
+		ShippingFee:        order.ShippingFee,
+		OrderShippingID:    shipping.ID,
+		CourierServiceCode: shipping.CourierServiceCode,
+		AwbSource:          &awbManual,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	productIDs, err := u.repo.InsertFulfillmentProducts(tx, ffID, items, brandNames)
+	if err != nil {
+		return 0, err
+	}
+	productMap := make(map[int64]int64, len(items))
+	for i, item := range items {
+		if i < len(productIDs) {
+			productMap[item.ID] = productIDs[i]
+		}
+	}
+	if err := u.matchItemCodes(tx, ffID, order.ID, items, productMap); err != nil {
+		return 0, err
+	}
+
+	// Set item_code from consign data
+	if consign != nil && consign.ItemCode != "" {
+		codes, err := u.repo.QueryItemCodesByFulfillment(tx, ffID)
+		if err == nil {
+			for _, c := range codes {
+				u.repo.UpdateItemCodeValue(tx, c.ID, consign.ItemCode)
+			}
+		}
+	}
+
+	return ffID, nil
+}
+
+// ─── Process CASE 3 (UPDATE) ───────────────────────────────────────────────
 
 func (u *Usecase) processUpdateFulfillments(tx *gorm.DB, order *repository.Order,
 	fulfillments []repository.Fulfillment, items []repository.OrderItem) error {
@@ -434,11 +527,11 @@ func (u *Usecase) matchItemCodes(tx *gorm.DB, fulfillmentID, orderID int64, item
 		}
 
 		if matchFfFilled {
-			if err := u.repo.UpdateItemCodeFulfillmentProduct(tx, matchID, fpID, orderID); err != nil {
+			if err := u.repo.UpdateItemCodeFulfillmentProduct(tx, matchID, fpID, orderID, item.ID); err != nil {
 				return fmt.Errorf("update item code %d failed: %w", matchID, err)
 			}
 		} else {
-			if err := u.repo.UpdateItemCodeFulfillment(tx, matchID, fulfillmentID, fpID, orderID); err != nil {
+			if err := u.repo.UpdateItemCodeFulfillment(tx, matchID, fulfillmentID, fpID, orderID, item.ID); err != nil {
 				return fmt.Errorf("update item code %d failed: %w", matchID, err)
 			}
 		}

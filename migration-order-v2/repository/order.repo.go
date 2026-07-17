@@ -21,6 +21,8 @@ type Order struct {
 	PaymentProgress  string
 	ProcessedAt      *time.Time
 	CompletedAt      *time.Time
+	ShippingFee      float64
+	InsuranceFee     float64
 }
 
 type OrderItem struct {
@@ -39,11 +41,14 @@ type OrderItem struct {
 	IsBundling   bool
 	IsCouple     bool
 	IsPreOrder   bool
+	IsConsign    bool
 }
 
 type ConsignmentData struct {
 	OfficeID  int32
 	StoreName string
+	AwbNumber string
+	ItemCode  string
 }
 
 // ─── Repository ────────────────────────────────────────────────────────────
@@ -88,7 +93,7 @@ func (r *Repository) QueryOrders(startDate, endDate, orderNumbers string) ([]Ord
 	query := fmt.Sprintf(`
 		SELECT o.id, o.order_number, o.reference_number, o.status_id, o.shipping_method::text,
 			   o.office_id, o.sales_channel_code, o.payment_progress::text,
-			   o.processed_at, o.completed_at
+			   o.processed_at, o.completed_at, o.shipping_fee, o.insurance_fee
 		FROM %s.tr_order o
 		WHERE %s
 		ORDER BY o.id
@@ -110,7 +115,8 @@ func (r *Repository) QueryOrderItems(orderIDs []int64) (map[int64][]OrderItem, e
 		SELECT oi.id, oi.order_id, oi.variant_id, oi.variant_sku, oi.variant_name,
 			   oi.qty, oi.product_name, oi.brand_id, oi.selling_price,
 			   oi.sku_universal, oi.product_image,
-			   oi.is_add_on, oi.is_bundling, oi.is_couple, oi.is_pre_order
+			   oi.is_add_on, oi.is_bundling, oi.is_couple, oi.is_pre_order,
+			   oi.is_consign
 		FROM %s.tr_order_item oi
 		WHERE oi.order_id IN (%s) AND oi.is_deleted = false AND oi.deleted_at IS NULL
 		ORDER BY oi.id
@@ -132,6 +138,7 @@ func (r *Repository) QueryOrderItems(orderIDs []int64) (map[int64][]OrderItem, e
 		IsBundling   bool
 		IsCouple     bool
 		IsPreOrder   bool
+		IsConsign    bool
 	}
 
 	var raw []rawItem
@@ -149,6 +156,7 @@ func (r *Repository) QueryOrderItems(orderIDs []int64) (map[int64][]OrderItem, e
 			SellingPrice: rw.SellingPrice, SkuUniversal: rw.SkuUniversal,
 			ImageURL: rw.ProductImage, IsAddOn: rw.IsAddOn,
 			IsBundling: rw.IsBundling, IsCouple: rw.IsCouple, IsPreOrder: rw.IsPreOrder,
+			IsConsign: rw.IsConsign,
 		})
 	}
 	return m, nil
@@ -200,10 +208,14 @@ func (r *Repository) ResolveConsignmentData(orderIDs []int64) (map[int64]*Consig
 		OrderID   int64  `gorm:"column:order_id"`
 		OfficeID  int32  `gorm:"column:office_id"`
 		StoreName string `gorm:"column:store_name"`
+		AwbNumber string `gorm:"column:awb_number"`
+		ItemCode  string `gorm:"column:item_code"`
 	}
 	var rows []consignRow
 	err := r.DB.Raw(fmt.Sprintf(`
-		SELECT DISTINCT ON (oc.order_id) oc.order_id, oc.office_id, mo.name AS store_name
+		SELECT DISTINCT ON (oc.order_id) oc.order_id, oc.office_id, mo.name AS store_name,
+			   COALESCE(oc.awb_number, '') AS awb_number,
+			   COALESCE(oc.item_codes[1]::text, '') AS item_code
 		FROM %s.tr_order_consign oc
 		JOIN %s.ms_office mo ON mo.id = oc.office_id
 		WHERE oc.order_id IN (%s)
@@ -214,7 +226,12 @@ func (r *Repository) ResolveConsignmentData(orderIDs []int64) (map[int64]*Consig
 
 	m := make(map[int64]*ConsignmentData)
 	for _, row := range rows {
-		m[row.OrderID] = &ConsignmentData{OfficeID: row.OfficeID, StoreName: row.StoreName}
+		m[row.OrderID] = &ConsignmentData{
+			OfficeID:  row.OfficeID,
+			StoreName: row.StoreName,
+			AwbNumber: row.AwbNumber,
+			ItemCode:  row.ItemCode,
+		}
 	}
 	return m, nil
 }
@@ -223,6 +240,29 @@ func (r *Repository) ResolveOfficeName(tx *gorm.DB, officeID int32) string {
 	var name string
 	tx.Raw(fmt.Sprintf("SELECT name FROM %s.ms_office WHERE id = ?", r.Schema), officeID).Scan(&name)
 	return name
+}
+
+type OrderShipping struct {
+	ID                 int64
+	TrackingCode       string
+	DropshipName       string
+	CourierID          int32
+	CourierServiceCode string
+}
+
+func (r *Repository) QueryOrderShipping(tx *gorm.DB, orderID int64) *OrderShipping {
+	var s OrderShipping
+	tx.Raw(fmt.Sprintf(`
+		SELECT COALESCE(id, 0) AS id,
+			   COALESCE(tracking_code, '') AS tracking_code,
+			   COALESCE(dropship_name, '') AS dropship_name,
+			   COALESCE(courier_id, 0) AS courier_id,
+			   COALESCE(courier_name_with_service, '') AS courier_service_code
+		FROM %s.tr_order_shipping
+		WHERE order_id = ? AND deleted_at IS NULL
+		ORDER BY id DESC LIMIT 1
+	`, r.Schema), orderID).Scan(&s)
+	return &s
 }
 
 // ─── Order Writes ──────────────────────────────────────────────────────────
