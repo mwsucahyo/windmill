@@ -41,7 +41,17 @@ func main() {
 		return
 	}
 
-	res, err := inner.Main(xmsCatalystDSN, schema, startDate, endDate, orderNumbers, mongoURI)
+	res, err := inner.Main(struct {
+		Schema       string `json:"schema"`
+		OrderNumbers string `json:"order_numbers"`
+		StartDate    string `json:"start_date"`
+		EndDate      string `json:"end_date"`
+	}{
+		Schema:       schema,
+		OrderNumbers: orderNumbers,
+		StartDate:    startDate,
+		EndDate:      endDate,
+	})
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

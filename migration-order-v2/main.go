@@ -17,12 +17,17 @@ import (
 )
 
 const (
-	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_prod"
-	DefaultMongoResource    = "f/voila_anomalies/voila_mongodb_prod"
+	DefaultCatalystVoilaResource     = "u/mirza/catalyst_xms_postgresql_voila_prod"
+	DefaultCatalystJamtanganResource = "u/mirza/catalyst_xms_postgresql_jamtangan_prod"
+	DefaultMongoResource             = "f/voila_anomalies/voila_mongodb_prod"
 )
 
 func Main(xmsCatalystDSN, schema, startDate, endDate, orderNumbers, mongoResourceOrURI string) (interface{}, error) {
-	catalystDSN := resolveDSN(xmsCatalystDSN, DefaultCatalystResource)
+	catalystResource := DefaultCatalystVoilaResource
+	if schema == "jamtangan" {
+		catalystResource = DefaultCatalystJamtanganResource
+	}
+	catalystDSN := resolveDSN(xmsCatalystDSN, catalystResource)
 	if catalystDSN == "" {
 		return nil, fmt.Errorf("catalyst dsn could not be resolved")
 	}

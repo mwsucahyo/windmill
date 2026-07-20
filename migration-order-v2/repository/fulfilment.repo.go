@@ -116,7 +116,7 @@ func (r *Repository) InsertFulfillment(tx *gorm.DB, o *Order, code string, data 
 			 is_visible, order_number, order_reference, awb_number, is_dropship,
 			 courier_service_id, insurance_fee, is_has_insurance, shipping_fee,
 			 order_shipping_id, courier_service_code,
-			 NULLIF(?, '')::fulfillment_awb_source,
+			 order_shipping_id, courier_service_code, awb_source,
 			 expired_at, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?::text::%s.processing_method_enum,
 				?, ?, ?, ?, ?, ?,
