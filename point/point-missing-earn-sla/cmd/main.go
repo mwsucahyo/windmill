@@ -12,7 +12,7 @@ func main() {
 	// Load environment variables locally
 	loadEnv()
 
-	xmsCatalystDSN := os.Getenv("XMS_CATALYST_VOILA_DSN")
+	xmsCatalystDSN := os.Getenv("XMS_CATALYST_DSN")
 	voilaAccountDSN := os.Getenv("VOILA_ACCOUNT_DSN")
 
 	// Call the Main function exported by the 'inner' package
@@ -21,7 +21,7 @@ func main() {
 		fmt.Printf("Error: %v\n", err)
 		return
 	}
-	
+
 	if res != nil {
 		fmt.Println(res)
 	} else {

@@ -78,7 +78,7 @@ func Main(xmsCatalystDSN, voilaAccountDSN string) (interface{}, error) {
 		FROM tr_order t
 		JOIN tr_order_customer toc
 			ON toc.order_id = t.id
-		LEFT JOIN dblink(
+		LEFT JOIN public.dblink(
 			'%[1]s',
 			$$
 			SELECT 
