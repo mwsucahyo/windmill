@@ -213,10 +213,11 @@ func (r *Repository) QueryCoveredVariants(tx *gorm.DB, orderID int64) (map[int64
 	type fpRow struct {
 		OrderItemID int64
 		VariantID   int32
+		Qty         int32
 	}
 	var rows []fpRow
 	err := tx.Raw(fmt.Sprintf(`
-		SELECT COALESCE(fp.order_item_id, 0) AS order_item_id, fp.variant_id
+		SELECT COALESCE(fp.order_item_id, 0) AS order_item_id, fp.variant_id, fp.qty
 		FROM %s.tr_fulfillment_product fp
 		JOIN %s.tr_fulfillment f ON f.id = fp.fulfillment_id
 		WHERE f.order_id = ? AND f.deleted_at IS NULL
@@ -232,7 +233,7 @@ func (r *Repository) QueryCoveredVariants(tx *gorm.DB, orderID int64) (map[int64
 		if r.OrderItemID > 0 {
 			covered[r.OrderItemID] = true
 		} else {
-			variantQty[r.VariantID]++
+			variantQty[r.VariantID] += int(r.Qty)
 		}
 	}
 
