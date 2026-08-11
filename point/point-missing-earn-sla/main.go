@@ -192,5 +192,14 @@ func formatMarkdown(data []MissingEarnOrder) string {
 		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %.0f | [View Order](%s) | [View Customer](%s) |\n",
 			d.OrderID, d.OrderNumber, createdAt, completedAt, d.PointEarned, d.OrderLink, d.CustomerLink))
 	}
+
+	sb.WriteString("\n### How to Handle\n")
+	sb.WriteString("1. **Insert point manually** ke `account_point` di database `voila_account`:\n")
+	sb.WriteString("```sql\n")
+	sb.WriteString("INSERT INTO account_point (order_id, order_number, source, point_amount, created_at)\n")
+	sb.WriteString("VALUES (<order_id>, '<order_number>', 'transaction', <point_amount>, NOW());\n")
+	sb.WriteString("```\n")
+	sb.WriteString("2. Atau set `point_earned = 0` di `voila.tr_order` kalau order emang gak berhak dapet poin.\n")
+
 	return sb.String()
 }

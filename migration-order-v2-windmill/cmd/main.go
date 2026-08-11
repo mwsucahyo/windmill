@@ -51,7 +51,7 @@ func main() {
 		OrderNumbers: orderNumbers,
 		StartDate:    startDate,
 		EndDate:      endDate,
-	})
+	}, xmsCatalystDSN, mongoURI)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

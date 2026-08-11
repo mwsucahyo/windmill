@@ -1364,10 +1364,7 @@ func Main(migrationParams struct {
 	OrderNumbers string `json:"order_numbers"`
 	StartDate    string `json:"start_date"`
 	EndDate      string `json:"end_date"`
-}) (interface{}, error) {
-	var (
-		xmsCatalystDSN, mongoResourceOrURI string
-	)
+}, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error) {
 	catalystResource := DefaultCatalystVoilaResource
 	if migrationParams.Schema == "jamtangan" {
 		catalystResource = DefaultCatalystJamtanganResource
