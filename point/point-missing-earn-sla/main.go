@@ -194,12 +194,7 @@ func formatMarkdown(data []MissingEarnOrder) string {
 	}
 
 	sb.WriteString("\n### How to Handle\n")
-	sb.WriteString("1. **Insert point manually** ke `account_point` di database `voila_account`:\n")
-	sb.WriteString("```sql\n")
-	sb.WriteString("INSERT INTO account_point (order_id, order_number, source, point_amount, created_at)\n")
-	sb.WriteString("VALUES (<order_id>, '<order_number>', 'transaction', <point_amount>, NOW());\n")
-	sb.WriteString("```\n")
-	sb.WriteString("2. Atau set `point_earned = 0` di `voila.tr_order` kalau order emang gak berhak dapet poin.\n")
+	sb.WriteString("Referensi: [Order Completed but Points Not Credited to Voila Account](https://jamtangan.atlassian.net/wiki/spaces/EN/pages/3833921538/Order+Completed+but+Points+Not+Credited+to+Voila+Account)\n")
 
 	return sb.String()
 }
