@@ -906,7 +906,7 @@ func queryFulfillments(db *gorm.DB, schema string, orderIDs []int64) (map[int64]
 		SELECT f.id, f.order_id, f.processing_status_id,
 			   f.processing_method::text, f.is_replaced
 		FROM %s.tr_fulfillment f
-		WHERE f.is_replaced = false AND f.deleted_at IS NULL AND f.order_id IN (%s)
+		WHERE f.status = 'COMPLETED' AND f.is_replaced = false AND f.deleted_at IS NULL AND f.order_id IN (%s)
 		ORDER BY f.id
 	`, schema, joinIDs(orderIDs))
 
@@ -963,23 +963,23 @@ func generateFulfillmentSeq(tx *gorm.DB, schema string) (int64, error) {
 func insertFulfillment(tx *gorm.DB, schema string, o *Order, code string, data *FulfillmentInsertData) (int64, error) {
 	query := fmt.Sprintf(`
 		INSERT INTO %s.tr_fulfillment
-			(code, order_id, channel, store_name, office_id,
+			(code, order_id, status, channel, store_name, office_id,
 			 payment_status, payment_date, processing_method, processing_status_id,
 			 is_visible, order_number, order_reference, awb_number, is_dropship,
 			 courier_service_id, insurance_fee, is_has_insurance, shipping_fee,
 			 order_shipping_id, courier_service_code, awb_source,
 			 expired_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?::text::%s.processing_method_enum,
+		VALUES (?, ?, ?::text::%s.fulfillment_status, ?, ?, ?, ?, ?, ?::text::%s.processing_method_enum,
 				?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?,
 				?, ?, ?,
 				NOW() + INTERVAL '1 DAY', NOW(), NOW())
 		RETURNING id
-	`, schema, schema)
+	`, schema, schema, schema)
 
 	var id int64
 	err := tx.Raw(query,
-		code, o.ID, data.Channel, data.StoreName,
+		code, o.ID, "COMPLETED", data.Channel, data.StoreName,
 		data.OfficeID, data.PaymentStatus, data.PaymentDate,
 		data.ProcessingMethod, data.ProcessingStatusID,
 		data.IsVisible, o.OrderNumber, o.ReferenceNumber,
@@ -1077,9 +1077,8 @@ func queryCoveredVariants(tx *gorm.DB, schema string, orderID int64) (map[int64]
 	for _, r := range rows {
 		if r.OrderItemID > 0 {
 			covered[r.OrderItemID] = true
-		} else {
-			variantQty[r.VariantID] += int(r.Qty)
 		}
+		variantQty[r.VariantID] += int(r.Qty)
 	}
 
 	if len(variantQty) > 0 {
@@ -1387,12 +1386,12 @@ func connectDB(dsn string) (*gorm.DB, error) {
 }
 
 func Main(migrationParams struct {
+	Environment  string `json:"environment"`
+	IsTesting    bool   `json:"is_testing"`
 	Schema       string `json:"schema"`
 	OrderNumbers string `json:"order_numbers"`
 	StartDate    string `json:"start_date"`
 	EndDate      string `json:"end_date"`
-	Environment  string `json:"environment"`
-	IsTesting    bool   `json:"is_testing"`
 }, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error) {
 	if migrationParams.Environment == "" {
 		migrationParams.Environment = "dev"

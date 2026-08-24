@@ -49,19 +49,19 @@ func main() {
 	}
 
 	res, err := inner.Main(struct {
+		Environment  string `json:"environment"`
+		IsTesting    bool   `json:"is_testing"`
 		Schema       string `json:"schema"`
 		OrderNumbers string `json:"order_numbers"`
 		StartDate    string `json:"start_date"`
 		EndDate      string `json:"end_date"`
-		Environment  string `json:"environment"`
-		IsTesting    bool   `json:"is_testing"`
 	}{
+		Environment:  environment,
+		IsTesting:    isTesting,
 		Schema:       schema,
 		OrderNumbers: orderNumbers,
 		StartDate:    startDate,
 		EndDate:      endDate,
-		Environment:  environment,
-		IsTesting:    isTesting,
 	}, xmsCatalystDSN, mongoURI)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
