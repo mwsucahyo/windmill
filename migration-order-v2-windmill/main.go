@@ -2,6 +2,7 @@ package inner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -76,10 +77,12 @@ type OrderItem struct {
 }
 
 type ConsignmentData struct {
+	ConsignID int64
 	OfficeID  int32
 	StoreName string
 	AwbNumber string
-	ItemCode  string
+	VariantID int32
+	ItemCodes []string
 }
 
 type OrderShipping struct {
@@ -234,9 +237,9 @@ func (u *Usecase) processOrders() ([]MigrationResult, error) {
 	for _, o := range orders {
 		fulfillments := ffMap[o.ID]
 		items := itemsByOrder[o.ID]
-		consign := consignByOrder[o.ID]
+		consigns := consignByOrder[o.ID]
 
-		r := u.processOrder(&o, fulfillments, items, consign, brandNames)
+		r := u.processOrder(&o, fulfillments, items, consigns, brandNames)
 		results = append(results, r)
 	}
 
@@ -248,7 +251,7 @@ func (u *Usecase) isRejectedNoFF(order *Order) bool {
 }
 
 func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
-	items []OrderItem, consign *ConsignmentData,
+	items []OrderItem, consigns []*ConsignmentData,
 	brandNames map[int32]string) MigrationResult {
 
 	r := MigrationResult{OrderID: order.ID, OrderNumber: order.OrderNumber}
@@ -293,18 +296,28 @@ func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
 	}
 
 	if len(uncoveredItems) > 0 {
-		var ffID int64
 		isConsignOrder := uncoveredItems[0].IsConsign
 
-		if order.ShippingMethod == "CARRY_OUT" && !isConsignOrder {
+		switch {
+		case order.ShippingMethod == "CARRY_OUT" && !isConsignOrder:
+			var ffID int64
 			ffID, err = u.processCarryOutCreate(tx, order, uncoveredItems, brandNames)
 			caseStr = "CREATE_CARRY_OUT"
-		} else if isConsignOrder {
-			ffID, err = u.processConsignCreate(tx, order, uncoveredItems, consign, brandNames)
+			allFFIDs = append(allFFIDs, ffID)
+		case isConsignOrder:
+			var ffIDs []int64
+			ffIDs, err = u.processConsignCreate(tx, order, uncoveredItems, consigns, brandNames)
 			caseStr = "CREATE_CONSIGN"
-		} else {
-			ffID, err = u.processHomeDeliveryCreate(tx, order, uncoveredItems, consign, brandNames)
+			allFFIDs = append(allFFIDs, ffIDs...)
+		default:
+			var firstConsign *ConsignmentData
+			if len(consigns) > 0 {
+				firstConsign = consigns[0]
+			}
+			var ffID int64
+			ffID, err = u.processHomeDeliveryCreate(tx, order, uncoveredItems, firstConsign, brandNames)
 			caseStr = "CREATE_HOME_DELIVERY"
+			allFFIDs = append(allFFIDs, ffID)
 		}
 		if err != nil {
 			tx.Rollback()
@@ -314,7 +327,6 @@ func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
 			u.saveLog(r, caseStr, nil, "")
 			return r
 		}
-		allFFIDs = append(allFFIDs, ffID)
 	}
 
 	if len(fulfillments) > 0 {
@@ -485,73 +497,131 @@ func (u *Usecase) processHomeDeliveryCreate(tx *gorm.DB, order *Order,
 }
 
 func (u *Usecase) processConsignCreate(tx *gorm.DB, order *Order,
-	items []OrderItem, consign *ConsignmentData, brandNames map[int32]string) (int64, error) {
+	items []OrderItem, consigns []*ConsignmentData, brandNames map[int32]string) ([]int64, error) {
 
-	code, err := u.generateFulfillmentCode(tx, order)
-	if err != nil {
-		return 0, err
-	}
-
-	officeID := order.OfficeID
-	storeName := resolveOfficeName(tx, u.schema, order.OfficeID)
-	if consign != nil {
-		officeID = consign.OfficeID
-		storeName = consign.StoreName
-	}
 	shipping := queryOrderShipping(tx, u.schema, order.ID)
-	awbNumber := shipping.TrackingCode
-	if consign != nil && consign.AwbNumber != "" {
-		awbNumber = consign.AwbNumber
-	}
-	awbManual := "MANUAL"
 
-	ffID, err := insertFulfillment(tx, u.schema, order, code, &FulfillmentInsertData{
-		Channel:            order.SalesChannelCode,
-		StoreName:          storeName,
-		OfficeID:           officeID,
-		PaymentStatus:      order.PaymentProgress,
-		PaymentDate:        order.ProcessedAt,
-		ProcessingMethod:   "HOME_DELIVERY",
-		ProcessingStatusID: ProcessingStatusCompleted,
-		IsVisible:          false,
-		AwbNumber:          awbNumber,
-		IsDropship:         shipping.DropshipName != "",
-		CourierServiceID:   shipping.CourierID,
-		InsuranceFee:       order.InsuranceFee,
-		IsHasInsurance:     order.InsuranceFee > 0,
-		ShippingFee:        order.ShippingFee,
-		OrderShippingID:    shipping.ID,
-		CourierServiceCode: shipping.CourierServiceCode,
-		AwbSource:          &awbManual,
-	})
-	if err != nil {
-		return 0, err
+	itemByVariant := make(map[int32]OrderItem)
+	for _, it := range items {
+		itemByVariant[it.VariantID] = it
 	}
 
-	productIDs, err := insertFulfillmentProducts(tx, u.schema, ffID, items, brandNames)
-	if err != nil {
-		return 0, err
-	}
-	productMap := make(map[int64]int64, len(items))
-	for i, item := range items {
-		if i < len(productIDs) {
-			productMap[item.ID] = productIDs[i]
+	var officeOrder []int32
+	groupByOffice := make(map[int32][]*ConsignmentData)
+	for _, c := range consigns {
+		if _, ok := groupByOffice[c.OfficeID]; !ok {
+			officeOrder = append(officeOrder, c.OfficeID)
 		}
-	}
-	if err := u.matchItemCodes(tx, ffID, order.ID, items, productMap); err != nil {
-		return 0, err
+		groupByOffice[c.OfficeID] = append(groupByOffice[c.OfficeID], c)
 	}
 
-	if consign != nil && consign.ItemCode != "" {
-		codes, err := queryItemCodesByFulfillment(tx, u.schema, ffID)
-		if err == nil {
-			for _, c := range codes {
-				updateItemCodeValue(tx, u.schema, c.ID, consign.ItemCode)
+	var ffIDs []int64
+	for _, officeID := range officeOrder {
+		group := groupByOffice[officeID]
+		first := group[0]
+
+		variantOrder := make([]int32, 0)
+		qtyByVariant := make(map[int32]int)
+		for _, c := range group {
+			if _, ok := qtyByVariant[c.VariantID]; !ok {
+				variantOrder = append(variantOrder, c.VariantID)
+			}
+			qtyByVariant[c.VariantID] += len(c.ItemCodes)
+		}
+
+		var consignItems []OrderItem
+		for _, vid := range variantOrder {
+			item, ok := itemByVariant[vid]
+			if !ok {
+				continue
+			}
+			item.Qty = int32(qtyByVariant[vid])
+			consignItems = append(consignItems, item)
+		}
+		if len(consignItems) == 0 {
+			continue
+		}
+
+		code, err := u.generateFulfillmentCode(tx, order)
+		if err != nil {
+			return ffIDs, err
+		}
+
+		awbNumber := first.AwbNumber
+		if awbNumber == "" {
+			awbNumber = shipping.TrackingCode
+		}
+		awbManual := "MANUAL"
+
+		ffID, err := insertFulfillment(tx, u.schema, order, code, &FulfillmentInsertData{
+			Channel:            order.SalesChannelCode,
+			StoreName:          first.StoreName,
+			OfficeID:           officeID,
+			PaymentStatus:      order.PaymentProgress,
+			PaymentDate:        order.ProcessedAt,
+			ProcessingMethod:   "HOME_DELIVERY",
+			ProcessingStatusID: ProcessingStatusCompleted,
+			IsVisible:          false,
+			AwbNumber:          awbNumber,
+			IsDropship:         shipping.DropshipName != "",
+			CourierServiceID:   shipping.CourierID,
+			InsuranceFee:       order.InsuranceFee,
+			IsHasInsurance:     order.InsuranceFee > 0,
+			ShippingFee:        order.ShippingFee,
+			OrderShippingID:    shipping.ID,
+			CourierServiceCode: shipping.CourierServiceCode,
+			AwbSource:          &awbManual,
+		})
+		if err != nil {
+			return ffIDs, err
+		}
+
+		productIDs, err := insertFulfillmentProducts(tx, u.schema, ffID, consignItems, brandNames)
+		if err != nil {
+			return ffIDs, err
+		}
+		productMap := make(map[int32]int64, len(consignItems))
+		for i, item := range consignItems {
+			if i < len(productIDs) {
+				productMap[item.VariantID] = productIDs[i]
+			}
+		}
+		if err := u.linkConsignItemCodes(tx, ffID, order, group, itemByVariant, productMap); err != nil {
+			return ffIDs, err
+		}
+
+		ffIDs = append(ffIDs, ffID)
+	}
+
+	return ffIDs, nil
+}
+
+func (u *Usecase) linkConsignItemCodes(tx *gorm.DB, ffID int64, order *Order,
+	group []*ConsignmentData, itemByVariant map[int32]OrderItem, productMap map[int32]int64) error {
+
+	for _, c := range group {
+		item, ok := itemByVariant[c.VariantID]
+		if !ok {
+			continue
+		}
+		fpID, ok := productMap[c.VariantID]
+		if !ok {
+			continue
+		}
+		for _, code := range c.ItemCodes {
+			id, err := queryUnmatchedItemCodeByVariant(tx, u.schema, order.ID, c.VariantID)
+			if err != nil {
+				return fmt.Errorf("query unmatched item code failed: %w", err)
+			}
+			if id == 0 {
+				continue
+			}
+			if err := updateItemCodeConsign(tx, u.schema, id, ffID, fpID, order.ID, item.ID, c.ConsignID, code); err != nil {
+				return fmt.Errorf("link item code %d failed: %w", id, err)
 			}
 		}
 	}
-
-	return ffID, nil
+	return nil
 }
 
 func (u *Usecase) processUpdateFulfillments(tx *gorm.DB, order *Order,
@@ -829,39 +899,49 @@ func resolveBrandNames(db *gorm.DB, schema string, itemsByOrder map[int64][]Orde
 	return m, nil
 }
 
-func resolveConsignmentData(db *gorm.DB, schema string, orderIDs []int64) (map[int64]*ConsignmentData, error) {
+func resolveConsignmentData(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]*ConsignmentData, error) {
 	if len(orderIDs) == 0 {
 		return nil, nil
 	}
 
 	type consignRow struct {
-		OrderID   int64  `gorm:"column:order_id"`
-		OfficeID  int32  `gorm:"column:office_id"`
-		StoreName string `gorm:"column:store_name"`
-		AwbNumber string `gorm:"column:awb_number"`
-		ItemCode  string `gorm:"column:item_code"`
+		ConsignID     int64  `gorm:"column:consign_id"`
+		OrderID       int64  `gorm:"column:order_id"`
+		OfficeID      int32  `gorm:"column:office_id"`
+		StoreName     string `gorm:"column:store_name"`
+		AwbNumber     string `gorm:"column:awb_number"`
+		VariantID     int32  `gorm:"column:variant_id"`
+		ItemCodesJSON string `gorm:"column:item_codes"`
 	}
 	var rows []consignRow
 	err := db.Raw(fmt.Sprintf(`
-		SELECT DISTINCT ON (oc.order_id) oc.order_id, oc.office_id, mo.name AS store_name,
+		SELECT oc.id AS consign_id, oc.order_id, oc.office_id, mo.name AS store_name,
 			   COALESCE(oc.awb_number, '') AS awb_number,
-			   COALESCE(oc.item_codes[1]::text, '') AS item_code
+			   oc.variant_id,
+			   COALESCE(array_to_json(oc.item_codes)::text, '[]') AS item_codes
 		FROM %s.tr_order_consign oc
 		JOIN %s.ms_office mo ON mo.id = oc.office_id
-		WHERE oc.order_id IN (%s)
+		WHERE oc.order_id IN (%s) AND oc.is_rejected = false
+		ORDER BY oc.order_id, oc.id
 	`, schema, schema, joinIDs(orderIDs))).Scan(&rows).Error
 	if err != nil {
 		return nil, fmt.Errorf("query consignment failed: %w", err)
 	}
 
-	m := make(map[int64]*ConsignmentData)
+	m := make(map[int64][]*ConsignmentData)
 	for _, row := range rows {
-		m[row.OrderID] = &ConsignmentData{
+		var codes []string
+		if row.ItemCodesJSON != "" {
+			_ = json.Unmarshal([]byte(row.ItemCodesJSON), &codes)
+		}
+		m[row.OrderID] = append(m[row.OrderID], &ConsignmentData{
+			ConsignID: row.ConsignID,
 			OfficeID:  row.OfficeID,
 			StoreName: row.StoreName,
 			AwbNumber: row.AwbNumber,
-			ItemCode:  row.ItemCode,
-		}
+			VariantID: row.VariantID,
+			ItemCodes: codes,
+		})
 	}
 	return m, nil
 }
@@ -1154,6 +1234,24 @@ func updateItemCodeValue(tx *gorm.DB, schema string, id int64, itemCode string) 
 		SET item_code = ?
 		WHERE id = ?
 	`, schema), itemCode, id).Error
+}
+
+func updateItemCodeConsign(tx *gorm.DB, schema string, id, fulfillmentID, fpID, orderID, orderItemID, consignID int64, itemCode string) error {
+	return tx.Exec(fmt.Sprintf(`
+		UPDATE %s.tr_fulfillment_item_code
+		SET fulfillment_id = ?, fulfillment_product_id = ?, order_id = ?, order_item_id = ?, item_code = ?, consign_id = ?
+		WHERE id = ? AND fulfillment_id IS NULL
+	`, schema), fulfillmentID, fpID, orderID, orderItemID, itemCode, consignID, id).Error
+}
+
+func queryUnmatchedItemCodeByVariant(tx *gorm.DB, schema string, orderID int64, variantID int32) (int64, error) {
+	var id int64
+	err := tx.Raw(fmt.Sprintf(`
+		SELECT id FROM %s.tr_fulfillment_item_code
+		WHERE order_id = ? AND variant_id = ? AND fulfillment_id IS NULL
+		ORDER BY id LIMIT 1
+	`, schema), orderID, variantID).Scan(&id).Error
+	return id, err
 }
 
 func updateFulfillmentCarryOut(tx *gorm.DB, schema string, ffID int64, processingStatusID int32, isVisible bool) error {
