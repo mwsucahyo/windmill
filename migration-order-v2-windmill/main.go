@@ -37,7 +37,7 @@ var resourceByEnv = map[string]ResourceConfig{
 	"prod": {
 		CatalystVoilaResource:     "u/mirza/catalyst_xms_postgresql_voila_prod",
 		CatalystJamtanganResource: "u/mirza/catalyst_xms_postgresql_jt_prod",
-		MongoResource:             "f/voila_anomalies/xms_catalyst_mongo_prod",
+		MongoResource:             "f/flows_engineering/xms_catalyst_mongo_prod",
 	},
 }
 
@@ -661,6 +661,7 @@ func (u *Usecase) matchItemCodes(tx *gorm.DB, fulfillmentID, orderID int64, item
 
 func (u *Usecase) saveLog(r MigrationResult, ffCase string, fulfillmentIDs []int64, processingMethod string) {
 	if u.mongoRepo == nil {
+		fmt.Printf("[DEBUG] saveLog skipped: mongoRepo is nil (order=%s status=%s)\n", r.OrderNumber, r.Status)
 		return
 	}
 
@@ -1421,18 +1422,16 @@ func Main(migrationParams struct {
 	}
 
 	var mongoClient *mongo.Client
-	var mongoURI string
-	if mongoResourceOrURI != "" {
-		mongoURI = resolveMongoURI(mongoResourceOrURI, resources.MongoResource)
-		if mongoURI != "" {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			mongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
-			cancel()
-			if err != nil {
-				return nil, fmt.Errorf("mongo connect error: %w", err)
-			}
-			defer mongoClient.Disconnect(context.Background())
+	mongoURI := resolveMongoURI(mongoResourceOrURI, resources.MongoResource)
+	fmt.Printf("[DEBUG] mongoResourceOrURI=%q mongoURI=%q\n", mongoResourceOrURI, mongoURI)
+	if mongoURI != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		mongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("mongo connect error: %w", err)
 		}
+		defer mongoClient.Disconnect(context.Background())
 	}
 
 	var mongoRepo *MongoRepository
