@@ -24,6 +24,13 @@ func main() {
 		return
 	}
 
+	environment := os.Getenv("MIGRATION_ENVIRONMENT")
+	if environment == "" {
+		environment = "dev"
+	}
+
+	isTesting := os.Getenv("MIGRATION_IS_TESTING") == "true"
+
 	mongoURI := os.Getenv("XMS_CATALYST_MONGO_URI")
 	if mongoURI == "" {
 		fmt.Println("XMS_CATALYST_MONGO_URI is not set")
@@ -46,11 +53,15 @@ func main() {
 		OrderNumbers string `json:"order_numbers"`
 		StartDate    string `json:"start_date"`
 		EndDate      string `json:"end_date"`
+		Environment  string `json:"environment"`
+		IsTesting    bool   `json:"is_testing"`
 	}{
 		Schema:       schema,
 		OrderNumbers: orderNumbers,
 		StartDate:    startDate,
 		EndDate:      endDate,
+		Environment:  environment,
+		IsTesting:    isTesting,
 	}, xmsCatalystDSN, mongoURI)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)

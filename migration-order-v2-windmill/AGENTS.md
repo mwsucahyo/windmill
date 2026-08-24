@@ -12,22 +12,26 @@ Hard rules: never read/open/modify `.env` or `.env.*`; respond in Bahasa Indones
 ## Entrypoint
 
 - `main.go` — package `inner`, import path `windmill/migration-order-v2-windmill`.
-  Exports `Main(migrationParams struct{Schema, OrderNumbers, StartDate, EndDate string})`.
+  Exports `Main(migrationParams struct{Schema, OrderNumbers, StartDate, EndDate, Environment string})`.
 - `cmd/main.go` — package `main` local runner.
 
 ## DSN resolution — Windmill-only
 
 `Main` never receives a DSN or Mongo URI: `xmsCatalystDSN` and `mongoResourceOrURI`
-are always empty strings in `main.go:1368-1370`. DSN is resolved **only** via
-`wmill.GetResource()` from hardcoded resource paths:
+are always empty strings in `main.go`. DSN is resolved **only** via
+`wmill.GetResource()` from hardcoded resource paths. Environment is chosen via
+`migrationParams.Environment` (default `"dev"`; valid: `dev`, `stg`, `prod`) in
+`resourceByEnv` (main.go):
 
-- default (schema `voila`): `u/mirza/catalyst_xms_postgresql_voila_dev`
-- schema `jamtangan`: `u/mirza/catalyst_xms_postgresql_jt_dev`
-- Mongo (unused, see gotcha): `f/flows_engineering/xms_catalyst_mongo_dev`
+| Env | voila | jamtangan | mongo |
+|---|---|---|---|
+| dev (default) | `u/mirza/catalyst_xms_postgresql_voila_dev` | `u/mirza/catalyst_xms_postgresql_jt_dev` | `f/flows_engineering/xms_catalyst_mongo_dev` |
+| stg | `u/mirza/catalyst_xms_postgresql_voila_stg` | `u/mirza/catalyst_xms_postgresql_jt_stg` | `f/flows_engineering/xms_catalyst_mongo_stg` |
+| prod | `u/mirza/catalyst_xms_postgresql_voila_prod` | `u/mirza/catalyst_xms_postgresql_jt_prod` | `f/voila_anomalies/voila_mongodb_prod` |
 
-These point at **dev** resources. The sibling `migration-order-v2/` tool points at
-**prod** resources (`u/mirza/..._prod`, `f/voila_anomalies/voila_mongodb_prod`) — do
-not cross-wire them.
+Note the structured sibling `migration-order-v2/` tool points only at **prod**
+resources with `..._jamtangan_prod` / `f/voila_anomalies/voila_mongodb_prod` — do not
+cross-wire.
 
 ## Local run
 
@@ -36,9 +40,9 @@ not cross-wire them.
 passes their values into `inner.Main`, so it always fails with
 `catalyst dsn could not be resolved`. Effective runtime is Windmill only.
 
-Runner env vars: `MIGRATION_SCHEMA`, `MIGRATION_START_DATE`, `MIGRATION_END_DATE`,
-`MIGRATION_ORDER_NUMBERS`. At least one of start date, end date, or order numbers is
-required.
+Runner env vars: `MIGRATION_SCHEMA`, `MIGRATION_ENVIRONMENT` (default `dev`),
+`MIGRATION_START_DATE`, `MIGRATION_END_DATE`, `MIGRATION_ORDER_NUMBERS`. At least one
+of start date, end date, or order numbers is required.
 
 ## Gotchas
 

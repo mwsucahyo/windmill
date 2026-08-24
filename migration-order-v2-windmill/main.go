@@ -14,11 +14,32 @@ import (
 )
 
 const (
-	DefaultCatalystVoilaResource           = "u/mirza/catalyst_xms_postgresql_voila_dev"
-	DefaultCatalystJamtanganResource       = "u/mirza/catalyst_xms_postgresql_jt_dev"
-	DefaultMongoResource                   = "f/flows_engineering/xms_catalyst_mongo_dev"
-	ProcessingStatusCompleted        int32 = 19
+	ProcessingStatusCompleted int32 = 19
 )
+
+type ResourceConfig struct {
+	CatalystVoilaResource     string
+	CatalystJamtanganResource string
+	MongoResource             string
+}
+
+var resourceByEnv = map[string]ResourceConfig{
+	"dev": {
+		CatalystVoilaResource:     "u/mirza/catalyst_xms_postgresql_voila_dev",
+		CatalystJamtanganResource: "u/mirza/catalyst_xms_postgresql_jt_dev",
+		MongoResource:             "f/flows_engineering/xms_catalyst_mongo_dev",
+	},
+	"stg": {
+		CatalystVoilaResource:     "u/mirza/catalyst_xms_postgresql_voila_stg",
+		CatalystJamtanganResource: "u/mirza/catalyst_xms_postgresql_jt_stg",
+		MongoResource:             "f/flows_engineering/xms_catalyst_mongo_stg",
+	},
+	"prod": {
+		CatalystVoilaResource:     "u/mirza/catalyst_xms_postgresql_voila_prod",
+		CatalystJamtanganResource: "u/mirza/catalyst_xms_postgresql_jt_prod",
+		MongoResource:             "f/voila_anomalies/xms_catalyst_mongo_prod",
+	},
+}
 
 type Order struct {
 	ID               int64
@@ -169,17 +190,19 @@ type Usecase struct {
 	startDate    string
 	endDate      string
 	orderNumbers string
+	isTesting    bool
 }
 
-func newUsecase(db *gorm.DB, mongoRepo *MongoRepository, schema, startDate, endDate, orderNumbers string) *Usecase {
+func newUsecase(db *gorm.DB, mongoRepo *MongoRepository, schema, startDate, endDate, orderNumbers string, isTesting bool) *Usecase {
 	return &Usecase{
 		db: db, mongoRepo: mongoRepo, schema: schema,
 		startDate: startDate, endDate: endDate, orderNumbers: orderNumbers,
+		isTesting: isTesting,
 	}
 }
 
 func (u *Usecase) processOrders() ([]MigrationResult, error) {
-	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers)
+	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers, u.isTesting)
 	if err != nil {
 		return nil, err
 	}
@@ -668,7 +691,7 @@ func (u *Usecase) saveLog(r MigrationResult, ffCase string, fulfillmentIDs []int
 	}
 }
 
-func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string) ([]Order, error) {
+func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, isTesting bool) ([]Order, error) {
 	var conditions []string
 	if startDate != "" {
 		conditions = append(conditions, fmt.Sprintf("o.created_at >= '%s'::timestamp", startDate))
@@ -680,7 +703,9 @@ func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string) (
 	conditions = append(conditions, "o.deleted_at IS NULL")
 	conditions = append(conditions, "o.order_version = 1")
 	conditions = append(conditions, "o.status_id = 5")
-	conditions = append(conditions, "o.completed_at + INTERVAL '5 days' < NOW()")
+	if !isTesting {
+		conditions = append(conditions, "o.completed_at + INTERVAL '5 days' < NOW()")
+	}
 
 	args := []interface{}{}
 	if orderNumbers != "" {
@@ -1365,10 +1390,19 @@ func Main(migrationParams struct {
 	OrderNumbers string `json:"order_numbers"`
 	StartDate    string `json:"start_date"`
 	EndDate      string `json:"end_date"`
+	Environment  string `json:"environment"`
+	IsTesting    bool   `json:"is_testing"`
 }, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error) {
-	catalystResource := DefaultCatalystVoilaResource
+	if migrationParams.Environment == "" {
+		migrationParams.Environment = "dev"
+	}
+	resources, ok := resourceByEnv[migrationParams.Environment]
+	if !ok {
+		return nil, fmt.Errorf("unsupported environment %q, must be dev, stg, or prod", migrationParams.Environment)
+	}
+	catalystResource := resources.CatalystVoilaResource
 	if migrationParams.Schema == "jamtangan" {
-		catalystResource = DefaultCatalystJamtanganResource
+		catalystResource = resources.CatalystJamtanganResource
 	}
 	catalystDSN := resolveDSN(xmsCatalystDSN, catalystResource)
 	if catalystDSN == "" {
@@ -1389,7 +1423,7 @@ func Main(migrationParams struct {
 	var mongoClient *mongo.Client
 	var mongoURI string
 	if mongoResourceOrURI != "" {
-		mongoURI = resolveMongoURI(mongoResourceOrURI, DefaultMongoResource)
+		mongoURI = resolveMongoURI(mongoResourceOrURI, resources.MongoResource)
 		if mongoURI != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			mongoClient, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
@@ -1407,13 +1441,15 @@ func Main(migrationParams struct {
 		mongoRepo = newMongo(mongoClient, dbName)
 	}
 
-	uc := newUsecase(db, mongoRepo, migrationParams.Schema, migrationParams.StartDate, migrationParams.EndDate, migrationParams.OrderNumbers)
+	uc := newUsecase(db, mongoRepo, migrationParams.Schema, migrationParams.StartDate, migrationParams.EndDate, migrationParams.OrderNumbers, migrationParams.IsTesting)
 
 	results, err := uc.processOrders()
 	if err != nil {
 		return nil, err
 	}
 	if results == nil {
+		fmt.Printf("No orders found in the given range (schema=%s, environment=%s, start=%s, end=%s)\n",
+			migrationParams.Schema, migrationParams.Environment, migrationParams.StartDate, migrationParams.EndDate)
 		return nil, nil
 	}
 
