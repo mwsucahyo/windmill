@@ -193,19 +193,20 @@ type Usecase struct {
 	startDate    string
 	endDate      string
 	orderNumbers string
+	limit        int
 	isTesting    bool
 }
 
-func newUsecase(db *gorm.DB, mongoRepo *MongoRepository, schema, startDate, endDate, orderNumbers string, isTesting bool) *Usecase {
+func newUsecase(db *gorm.DB, mongoRepo *MongoRepository, schema, startDate, endDate, orderNumbers string, limit int, isTesting bool) *Usecase {
 	return &Usecase{
 		db: db, mongoRepo: mongoRepo, schema: schema,
 		startDate: startDate, endDate: endDate, orderNumbers: orderNumbers,
-		isTesting: isTesting,
+		limit: limit, isTesting: isTesting,
 	}
 }
 
 func (u *Usecase) processOrders() ([]MigrationResult, error) {
-	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers, u.isTesting)
+	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers, u.limit, u.isTesting)
 	if err != nil {
 		return nil, err
 	}
@@ -765,7 +766,7 @@ func (u *Usecase) saveLog(r MigrationResult, ffCase string, fulfillmentIDs []int
 	}
 }
 
-func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, isTesting bool) ([]Order, error) {
+func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, limit int, isTesting bool) ([]Order, error) {
 	var conditions []string
 	if startDate != "" {
 		conditions = append(conditions, fmt.Sprintf("o.created_at >= '%s'::timestamp", startDate))
@@ -793,6 +794,11 @@ func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, i
 		conditions = append(conditions, fmt.Sprintf("o.order_number IN (%s)", strings.Join(placeholders, ",")))
 	}
 
+	limitClause := ""
+	if limit > 0 {
+		limitClause = fmt.Sprintf("LIMIT %d", limit)
+	}
+
 	query := fmt.Sprintf(`
 		SELECT o.id, o.order_number, o.reference_number, o.status_id, o.shipping_method::text,
 			   o.office_id, o.sales_channel_code, o.payment_progress::text,
@@ -800,7 +806,8 @@ func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, i
 		FROM %s.tr_order o
 		WHERE %s
 		ORDER BY o.id
-	`, schema, strings.Join(conditions, " AND "))
+		%s
+	`, schema, strings.Join(conditions, " AND "), limitClause)
 
 	var orders []Order
 	err := db.Raw(query, args...).Debug().Scan(&orders).Error
@@ -1493,6 +1500,7 @@ func Main(migrationParams struct {
 	OrderNumbers string `json:"order_numbers"`
 	StartDate    string `json:"start_date"`
 	EndDate      string `json:"end_date"`
+	Limit        int    `json:"limit"`
 }, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error) {
 	if migrationParams.Environment == "" {
 		migrationParams.Environment = "dev"
@@ -1540,7 +1548,7 @@ func Main(migrationParams struct {
 		mongoRepo = newMongo(mongoClient, dbName)
 	}
 
-	uc := newUsecase(db, mongoRepo, migrationParams.Schema, migrationParams.StartDate, migrationParams.EndDate, migrationParams.OrderNumbers, migrationParams.IsTesting)
+	uc := newUsecase(db, mongoRepo, migrationParams.Schema, migrationParams.StartDate, migrationParams.EndDate, migrationParams.OrderNumbers, migrationParams.Limit, migrationParams.IsTesting)
 
 	results, err := uc.processOrders()
 	if err != nil {

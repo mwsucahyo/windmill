@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
 
 	inner "windmill/migration-order-v2"
 
@@ -48,6 +49,16 @@ func main() {
 		return
 	}
 
+	limit := 0
+	if v := os.Getenv("MIGRATION_LIMIT"); v != "" {
+		parsed, err := strconv.Atoi(v)
+		if err != nil {
+			fmt.Printf("MIGRATION_LIMIT is not a valid integer: %v\n", err)
+			return
+		}
+		limit = parsed
+	}
+
 	res, err := inner.Main(struct {
 		Environment  string `json:"environment"`
 		IsTesting    bool   `json:"is_testing"`
@@ -55,6 +66,7 @@ func main() {
 		OrderNumbers string `json:"order_numbers"`
 		StartDate    string `json:"start_date"`
 		EndDate      string `json:"end_date"`
+		Limit        int    `json:"limit"`
 	}{
 		Environment:  environment,
 		IsTesting:    isTesting,
@@ -62,6 +74,7 @@ func main() {
 		OrderNumbers: orderNumbers,
 		StartDate:    startDate,
 		EndDate:      endDate,
+		Limit:        limit,
 	}, xmsCatalystDSN, mongoURI)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
