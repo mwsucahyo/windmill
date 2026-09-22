@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	inner "windmill/migration-order-v2-windmill"
+	inner "windmill/migration-order-v2"
 
 	"github.com/joho/godotenv"
 )

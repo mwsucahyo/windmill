@@ -647,7 +647,10 @@ func (u *Usecase) processUpdateFulfillments(tx *gorm.DB, order *Order,
 }
 
 func (u *Usecase) updateFulfillmentByMethod(tx *gorm.DB, order *Order, f *Fulfillment) error {
-	var method string = order.ShippingMethod
+	method := order.ShippingMethod
+	if f.ProcessingMethod != nil && *f.ProcessingMethod != "" {
+		method = *f.ProcessingMethod
+	}
 
 	isReplaced := false
 	if f.IsReplaced != nil {
