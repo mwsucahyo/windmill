@@ -23,10 +23,11 @@ import (
 // --- Constants ---
 
 const (
-	XMS_CATALYST_BASE_URL = "https://stg-catalyst-xms-web.machtwatch.net"
-	VOILA_UF_BASE_URL     = "https://stg-voila-web.machtwatch.net"
+	XMS_CATALYST_BASE_URL = "https://xms.ctlyst.id"
+	VOILA_XMS_BASE_URL    = "https://xms.voila.id"
+	VOILA_UF_BASE_URL     = "https://voila.id"
 
-	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_stg"
+	DefaultCatalystResource = "u/mirza/catalyst_xms_postgresql_voila_prod"
 
 	DefaultVaultAddrVariable        = "f/voila_anomalies/vault_addr"
 	DefaultVaultGithubTokenVariable = "f/voila_anomalies/vault_github_token"
@@ -43,9 +44,10 @@ const (
 	// Hardcoded fallback for Vault Addr if variable is empty
 	FallbackVaultAddr = "http://xxx.id:8200"
 
-	StockMovementLookback = 30 * time.Minute
+	StockMovementLookback = 60 * time.Minute
+	StockMovementGrace    = 2 * time.Minute
 
-	StatusMatchesMsg = "Success: Product status matches between XMS Catalyst & Voila UF."
+	StatusMatchesMsg = ""
 )
 
 // --- Models ---
@@ -134,13 +136,14 @@ func Main(xmsCatalystDSN, esURL string) (interface{}, error) {
 		return nil, fmt.Errorf("catalyst db error: %v", err)
 	}
 
-	// 3. Get Recent Movements (1 hour)
+	// 3. Get Recent Movements within the lookback window, excluding the grace
+	// period so the async RMQ consumer has time to propagate stock changes to ES.
 	movements, err := getRecentMovements(db)
 	if err != nil {
 		return nil, err
 	}
 	if len(movements) == 0 {
-		return "No stock movements in the last hour.", nil
+		return "No stock movements in the lookback window.", nil
 	}
 
 	// 4. Get Product IDs for these Variants
@@ -285,9 +288,11 @@ func connectDB(dsn string) (*gorm.DB, error) {
 
 func getRecentMovements(db *gorm.DB) ([]StockMovement, error) {
 	var movements []StockMovement
+	now := time.Now()
 	err := db.Table("voila.tr_stock_movement_history").
 		Select("DISTINCT variant_id").
-		Where("qty_column = ? AND created_at >= ?", "qty_available", time.Now().Add(-StockMovementLookback)).
+		Where("qty_column = ? AND created_at >= ? AND created_at <= ?",
+			"qty_available", now.Add(-StockMovementLookback), now.Add(-StockMovementGrace)).
 		Find(&movements).Error
 	return movements, err
 }
@@ -323,7 +328,6 @@ func fetchCatalystStockAtProductLevel(db *gorm.DB, productIDs []int) (map[int]Pr
 		Joins("JOIN voila.ms_product_variant mpv ON mpv.id = mpvs.variant_id").
 		Where("mpv.product_id IN ? AND mpvs.is_deleted = ?", productIDs, false).
 		Group("mpv.product_id").
-		Debug().
 		Scan(&results).Error
 
 	if err != nil {
@@ -416,9 +420,6 @@ func compareProductStatus(cat map[int]ProductStockResult, es map[int]ESProductIn
 		}
 
 		if (catData.TotalStock > 0 && esInfo.IsOutOfStock != 0) || (catData.TotalStock == 0 && esInfo.IsOutOfStock == 0) {
-			fmt.Println("esInfo.IsOutOfStock", esInfo.IsOutOfStock)
-			fmt.Println("esInfo.PreOrderStatus", esInfo.PreOrderStatus)
-
 			diffs = append(diffs, Discrepancy{
 				ProductID:   pid,
 				SKU:         catData.SKU,
@@ -438,15 +439,16 @@ func compareProductStatus(cat map[int]ProductStockResult, es map[int]ESProductIn
 func formatMarkdown(diffs []Discrepancy) string {
 	var sb strings.Builder
 	sb.WriteString("##### Hi @channel, Ada perbedaan status produk antara XMS Catalyst & Voila UF, minta tolong dicek yah..\n")
-	sb.WriteString("| Product ID | SKU | XMS Catalyst (Stock) | XMS Catalyst (Status) | Voila UF (Status) |\n")
-	sb.WriteString("| :--- | :--- | :---: | :---: | :---: |\n")
+	sb.WriteString("| Product ID | SKU | XMS Catalyst (Stock) | XMS Catalyst (Status) | Voila UF (Status) | XMS Voila URL |\n")
+	sb.WriteString("| :--- | :--- | :---: | :---: | :---: | :--- |\n")
 
 	for _, d := range diffs {
 		catLink := fmt.Sprintf("[%d](%s/voila/stock/office/%d)", d.CatalystQty, XMS_CATALYST_BASE_URL, d.ProductID)
 		voilaLink := fmt.Sprintf("[%s](%s/products/%d)", d.StatusES, VOILA_UF_BASE_URL, d.ProductID)
+		xmsVoilaLink := fmt.Sprintf("[%s](%s/product/%d/stockOffice)", d.StatusXMSC, VOILA_XMS_BASE_URL, d.ProductID)
 
-		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s |\n",
-			d.ProductID, d.SKU, catLink, d.StatusXMSC, voilaLink))
+		sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s | %s | %s |\n",
+			d.ProductID, d.SKU, catLink, d.StatusXMSC, voilaLink, xmsVoilaLink))
 	}
 	return sb.String()
 }
