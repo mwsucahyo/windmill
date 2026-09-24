@@ -132,11 +132,21 @@ The authoritative signal is `ms_product.couple_ids` (array of child product IDs)
 
 - `resolveCoupleInfo` (called from `queryOrderItems`, gated to
   `schema == "jamtangan"`) loads `couple_ids` for each order item's `product_id` and
-  sets `OrderItem.CoupleIDs`; `IsCouple` is overwritten to `true` when non-empty.
+  sets `OrderItem.CoupleIDs`. `OrderItem.IsCouple` keeps the raw
+  `tr_order_item.is_couple` value (never overwritten); couple detection uses
+  `len(CoupleIDs) > 0`.
 - Coverage (`queryCoveredVariants`): a couple item counts as covered when **all** of
   its `couple_ids` are present among the order's
   `tr_fulfillment_product.variant_id`. Assumes child `product_id == variant_id`
   (holds for current jamtangan data).
+- Source flag repair (`markOrderItemsCouple`, called at the start of `processOrder`
+  against the pool `u.db`, **outside** the fulfillment transaction): only items with
+  `len(CoupleIDs) > 0 && !IsCouple` are collected; if none, **no UPDATE is issued**.
+  Otherwise
+  `UPDATE tr_order_item SET is_couple = true WHERE id IN (...) AND COALESCE(is_couple, false) = false`.
+  Running outside the transaction means the repair persists even when the order later
+  ends in SKIP (`tx.Rollback()`), so no mismatch is left behind. The SQL guard handles
+  NULL/racy values; already-`true` rows are never overwritten.
 - Update (`updateFulfillmentProductOrderItemID`): sets `is_couple = true` and fills
   `order_item_id` on every child row (`variant_id IN couple_ids`).
 - Create (`insertFulfillmentProducts`): expands a couple item into one row per child —
@@ -144,6 +154,8 @@ The authoritative signal is `ms_product.couple_ids` (array of child product IDs)
   `variant_sku`/`variant_name` from `ms_product_variant`,
   `product_name`/`sku_universal`/`brand_id` from `ms_product`, and `image_url` from
   `ms_product_image`.
+- Couple detection uses `len(CoupleIDs) > 0`; the unreliable
+  `tr_order_item.is_couple` is repaired rather than trusted.
 
 ## Gotchas
 

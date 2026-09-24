@@ -302,6 +302,14 @@ func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
 
 	r := MigrationResult{OrderID: order.ID, OrderNumber: order.OrderNumber}
 
+	if err := markOrderItemsCouple(u.db, u.schema, items); err != nil {
+		r.Action = "UPDATE ORDER"
+		r.Status = "ERROR"
+		r.Detail = fmt.Sprintf("update order item is_couple failed: %v", err)
+		u.saveLog(r, "UPDATE_ORDER", nil, "")
+		return r
+	}
+
 	if len(fulfillments) == 0 && u.isRejectedNoFF(order) {
 		r.Action = "SKIP"
 		r.Status = "SKIPPED"
@@ -319,6 +327,7 @@ func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
 		r.Action = "UPDATE ORDER"
 		r.Status = "ERROR"
 		r.Detail = fmt.Sprintf("update order failed: %v", err)
+		u.saveLog(r, "UPDATE_ORDER", nil, "")
 		return r
 	}
 
@@ -983,7 +992,6 @@ func resolveCoupleInfo(db *gorm.DB, schema string, itemsByOrder map[int64][]Orde
 		for i := range items {
 			if cids, ok := coupleMap[items[i].ProductID]; ok {
 				items[i].CoupleIDs = cids
-				items[i].IsCouple = true
 			}
 		}
 	}
@@ -1104,6 +1112,29 @@ func updateOrder(tx *gorm.DB, schema string, orderID int64, statusIDs, subStatus
 		SET status_ids = ?::int4[], sub_status_ids = ?::int4[], order_version = 2
 		WHERE id = ?
 	`, schema), statusStr, subStatusStr, orderID).Error
+}
+
+func markOrderItemsCouple(db *gorm.DB, schema string, items []OrderItem) error {
+	var ids []int64
+	for _, item := range items {
+		if len(item.CoupleIDs) > 0 && !item.IsCouple {
+			ids = append(ids, item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	res := db.Exec(fmt.Sprintf(`
+		UPDATE %s.tr_order_item
+		SET is_couple = true
+		WHERE id IN (%s) AND COALESCE(is_couple, false) = false
+	`, schema, joinIDs(ids)))
+	if res.Error != nil {
+		return res.Error
+	}
+	fmt.Printf("[DEBUG] markOrderItemsCouple: candidates=%v, repaired=%d\n", ids, res.RowsAffected)
+	return nil
 }
 
 func queryFulfillments(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]Fulfillment, error) {
