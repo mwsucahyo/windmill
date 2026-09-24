@@ -8,6 +8,7 @@ import (
 	"time"
 
 	wmill "github.com/windmill-labs/windmill-go-client"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"gorm.io/driver/postgres"
@@ -60,6 +61,7 @@ type Order struct {
 type OrderItem struct {
 	ID           int64
 	OrderID      int64
+	ProductID    int32
 	VariantID    int32
 	VariantSKU   string
 	VariantName  string
@@ -74,6 +76,7 @@ type OrderItem struct {
 	IsCouple     bool
 	IsPreOrder   bool
 	IsConsign    bool
+	CoupleIDs    []int32
 }
 
 type ConsignmentData struct {
@@ -186,6 +189,32 @@ func (r *MongoRepository) saveMigrationLog(ctx context.Context, log *MigrationLo
 	return nil
 }
 
+func (r *MongoRepository) findSkippedOrderIDs(ctx context.Context, schemaName string) ([]int64, error) {
+	coll := r.client.Database(r.dbName).Collection("migration_order_v2_log")
+	values, err := coll.Distinct(ctx, "order_id", bson.M{
+		"schema": schemaName,
+		"status": "SKIPPED",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("query skipped order ids failed: %w", err)
+	}
+
+	ids := make([]int64, 0, len(values))
+	for _, v := range values {
+		switch n := v.(type) {
+		case int64:
+			ids = append(ids, n)
+		case int32:
+			ids = append(ids, int64(n))
+		case int:
+			ids = append(ids, int64(n))
+		case float64:
+			ids = append(ids, int64(n))
+		}
+	}
+	return ids, nil
+}
+
 type Usecase struct {
 	db           *gorm.DB
 	mongoRepo    *MongoRepository
@@ -205,8 +234,24 @@ func newUsecase(db *gorm.DB, mongoRepo *MongoRepository, schema, startDate, endD
 	}
 }
 
+func (u *Usecase) loadSkippedOrderIDs() ([]int64, error) {
+	if u.mongoRepo == nil {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	return u.mongoRepo.findSkippedOrderIDs(ctx, u.schema)
+}
+
 func (u *Usecase) processOrders() ([]MigrationResult, error) {
-	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers, u.limit, u.isTesting)
+	excludeIDs, err := u.loadSkippedOrderIDs()
+	if err != nil {
+		return nil, err
+	}
+
+	orders, err := queryOrders(u.db, u.schema, u.startDate, u.endDate, u.orderNumbers, u.limit, u.isTesting, excludeIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +325,7 @@ func (u *Usecase) processOrder(order *Order, fulfillments []Fulfillment,
 	var allFFIDs []int64
 	caseStr := ""
 
-	coveredVariants, err := queryCoveredVariants(tx, u.schema, order.ID)
+	coveredVariants, err := queryCoveredVariants(tx, u.schema, order.ID, items)
 	if err != nil {
 		tx.Rollback()
 		r.Action = "CREATE FF"
@@ -766,7 +811,7 @@ func (u *Usecase) saveLog(r MigrationResult, ffCase string, fulfillmentIDs []int
 	}
 }
 
-func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, limit int, isTesting bool) ([]Order, error) {
+func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, limit int, isTesting bool, excludeIDs []int64) ([]Order, error) {
 	var conditions []string
 	if startDate != "" {
 		conditions = append(conditions, fmt.Sprintf("o.created_at >= '%s'::timestamp", startDate))
@@ -780,6 +825,10 @@ func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, l
 	conditions = append(conditions, "o.status_id = 5")
 	if !isTesting {
 		conditions = append(conditions, "o.completed_at + INTERVAL '5 days' < NOW()")
+	}
+
+	if len(excludeIDs) > 0 {
+		conditions = append(conditions, fmt.Sprintf("o.id NOT IN (%s)", joinIDs(excludeIDs)))
 	}
 
 	args := []interface{}{}
@@ -822,7 +871,7 @@ func queryOrderItems(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]
 		return nil, nil
 	}
 	query := fmt.Sprintf(`
-		SELECT oi.id, oi.order_id, oi.variant_id, oi.variant_sku, oi.variant_name,
+		SELECT oi.id, oi.order_id, oi.product_id, oi.variant_id, oi.variant_sku, oi.variant_name,
 			   oi.qty, oi.product_name, oi.brand_id, oi.selling_price,
 			   oi.sku_universal, oi.product_image,
 			   oi.is_add_on, oi.is_bundling, oi.is_couple, oi.is_pre_order,
@@ -835,6 +884,7 @@ func queryOrderItems(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]
 	type rawItem struct {
 		ID           int64
 		OrderID      int64
+		ProductID    int32
 		VariantID    int32
 		VariantSKU   string
 		VariantName  string
@@ -860,7 +910,7 @@ func queryOrderItems(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]
 	m := make(map[int64][]OrderItem)
 	for _, rw := range raw {
 		m[rw.OrderID] = append(m[rw.OrderID], OrderItem{
-			ID: rw.ID, OrderID: rw.OrderID, VariantID: rw.VariantID,
+			ID: rw.ID, OrderID: rw.OrderID, ProductID: rw.ProductID, VariantID: rw.VariantID,
 			VariantSKU: rw.VariantSKU, VariantName: rw.VariantName,
 			Qty: rw.Qty, ProductName: rw.ProductName, BrandID: rw.BrandID,
 			SellingPrice: rw.SellingPrice, SkuUniversal: rw.SkuUniversal,
@@ -869,7 +919,75 @@ func queryOrderItems(db *gorm.DB, schema string, orderIDs []int64) (map[int64][]
 			IsConsign: rw.IsConsign,
 		})
 	}
+
+	if err := resolveCoupleInfo(db, schema, m); err != nil {
+		return nil, err
+	}
+
 	return m, nil
+}
+
+func resolveCoupleInfo(db *gorm.DB, schema string, itemsByOrder map[int64][]OrderItem) error {
+	if schema != "jamtangan" {
+		return nil
+	}
+
+	productSet := make(map[int32]struct{})
+	for _, items := range itemsByOrder {
+		for _, it := range items {
+			if it.ProductID > 0 {
+				productSet[it.ProductID] = struct{}{}
+			}
+		}
+	}
+	if len(productSet) == 0 {
+		return nil
+	}
+
+	ids := make([]int32, 0, len(productSet))
+	for id := range productSet {
+		ids = append(ids, id)
+	}
+
+	type coupleRow struct {
+		ID        int32
+		CoupleIDs string `gorm:"column:couple_ids"`
+	}
+	var rows []coupleRow
+	err := db.Raw(fmt.Sprintf(`
+		SELECT id, COALESCE(array_to_json(couple_ids)::text, '[]') AS couple_ids
+		FROM %s.ms_product
+		WHERE id IN (%s)
+	`, schema, joinInt32s(ids))).Scan(&rows).Error
+	if err != nil {
+		return fmt.Errorf("query couple ids failed: %w", err)
+	}
+
+	coupleMap := make(map[int32][]int32, len(rows))
+	for _, r := range rows {
+		var rawIDs []int64
+		if r.CoupleIDs != "" {
+			_ = json.Unmarshal([]byte(r.CoupleIDs), &rawIDs)
+		}
+		if len(rawIDs) == 0 {
+			continue
+		}
+		cids := make([]int32, 0, len(rawIDs))
+		for _, v := range rawIDs {
+			cids = append(cids, int32(v))
+		}
+		coupleMap[r.ID] = cids
+	}
+
+	for _, items := range itemsByOrder {
+		for i := range items {
+			if cids, ok := coupleMap[items[i].ProductID]; ok {
+				items[i].CoupleIDs = cids
+				items[i].IsCouple = true
+			}
+		}
+	}
+	return nil
 }
 
 func resolveBrandNames(db *gorm.DB, schema string, itemsByOrder map[int64][]OrderItem) (map[int32]string, error) {
@@ -1083,14 +1201,100 @@ func insertFulfillment(tx *gorm.DB, schema string, o *Order, code string, data *
 	return id, nil
 }
 
+type CoupleChild struct {
+	ProductID    int32
+	ProductName  string
+	SkuUniversal string
+	BrandID      int32
+	VariantID    int32
+	VariantSKU   string
+	VariantName  string
+	OurPrice     float64
+	ImageURL     string
+}
+
+func resolveCoupleChildren(db *gorm.DB, schema string, productIDs []int32) (map[int32]CoupleChild, error) {
+	res := make(map[int32]CoupleChild)
+	if len(productIDs) == 0 {
+		return res, nil
+	}
+
+	type childRow struct {
+		ProductID    int32   `gorm:"column:product_id"`
+		ProductName  string  `gorm:"column:product_name"`
+		SkuUniversal string  `gorm:"column:sku_universal"`
+		BrandID      int32   `gorm:"column:brand_id"`
+		VariantID    int32   `gorm:"column:variant_id"`
+		VariantSKU   string  `gorm:"column:variant_sku"`
+		VariantName  string  `gorm:"column:variant_name"`
+		OurPrice     float64 `gorm:"column:our_price"`
+		ImageURL     string  `gorm:"column:image_url"`
+	}
+	var rows []childRow
+	err := db.Raw(fmt.Sprintf(`
+		SELECT mp.id AS product_id, mp.name AS product_name, mp.sku_universal,
+			   mp.brand_id, v.id AS variant_id,
+			   COALESCE(v.variant_sku, '') AS variant_sku,
+			   COALESCE(v.name, '') AS variant_name,
+			   COALESCE(p.our_price, 0) AS our_price,
+			   COALESCE(img.url, '') AS image_url
+		FROM %s.ms_product mp
+		JOIN %s.ms_product_variant v ON v.product_id = mp.id AND v.is_deleted = false
+		LEFT JOIN %s.ms_product_variant_price p ON p.variant_id = v.id AND p.deleted_at IS NULL
+		LEFT JOIN LATERAL (
+			SELECT mi.url FROM %s.ms_product_image mi
+			WHERE mi.product_id = mp.id AND mi."type" = 'MAIN'
+			  AND mi.is_deleted = false AND mi.deleted_at IS NULL
+			ORDER BY mi.idx, mi.id
+			LIMIT 1
+		) img ON true
+		WHERE mp.id IN (%s)
+		ORDER BY mp.id, v.id
+	`, schema, schema, schema, schema, joinInt32s(productIDs))).Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("query couple children failed: %w", err)
+	}
+
+	for _, r := range rows {
+		if _, exists := res[r.ProductID]; exists {
+			continue
+		}
+		res[r.ProductID] = CoupleChild{
+			ProductID: r.ProductID, ProductName: r.ProductName, SkuUniversal: r.SkuUniversal,
+			BrandID: r.BrandID, VariantID: r.VariantID, VariantSKU: r.VariantSKU,
+			VariantName: r.VariantName, OurPrice: r.OurPrice, ImageURL: r.ImageURL,
+		}
+	}
+	return res, nil
+}
+
 func insertFulfillmentProducts(tx *gorm.DB, schema string, fulfillmentID int64,
 	items []OrderItem, brandNames map[int32]string) ([]int64, error) {
 
-	var productIDs []int64
-	for _, item := range items {
-		brandName := brandNames[item.BrandID]
+	var coupleChildIDs []int32
+	if schema == "jamtangan" {
+		for _, item := range items {
+			if len(item.CoupleIDs) > 0 {
+				coupleChildIDs = append(coupleChildIDs, item.CoupleIDs...)
+			}
+		}
+	}
+	var coupleChildren map[int32]CoupleChild
+	if len(coupleChildIDs) > 0 {
+		var err error
+		coupleChildren, err = resolveCoupleChildren(tx, schema, coupleChildIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	insertRow := func(variantID int32, variantSKU, variantName string, qty int32,
+		productName, skuUniversal string, brandID int32, price float64,
+		imageURL string, isAddOn, isBundling, isCouple, isPreOrder bool, orderItemID int64) (int64, error) {
+
+		brandName := brandNames[brandID]
 		if brandName == "" {
-			brandName = fmt.Sprintf("Brand%d", item.BrandID)
+			brandName = fmt.Sprintf("Brand%d", brandID)
 		}
 
 		var id int64
@@ -1103,11 +1307,43 @@ func insertFulfillmentProducts(tx *gorm.DB, schema string, fulfillmentID int64,
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id
 		`, schema),
-			fulfillmentID, item.VariantID, item.VariantSKU, item.VariantName,
-			item.Qty, item.ProductName, brandName, item.BrandID, item.SellingPrice,
-			item.SkuUniversal, item.ImageURL, item.IsAddOn, item.IsBundling,
-			item.IsCouple, item.IsPreOrder, item.ID,
+			fulfillmentID, variantID, variantSKU, variantName,
+			qty, productName, brandName, brandID, price,
+			skuUniversal, imageURL, isAddOn, isBundling,
+			isCouple, isPreOrder, orderItemID,
 		).Scan(&id).Error
+		if err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+
+	var productIDs []int64
+	for _, item := range items {
+		if len(item.CoupleIDs) > 0 {
+			firstID := int64(0)
+			for _, cid := range item.CoupleIDs {
+				child, ok := coupleChildren[cid]
+				if !ok {
+					continue
+				}
+				id, err := insertRow(child.VariantID, child.VariantSKU, child.VariantName, item.Qty,
+					child.ProductName, child.SkuUniversal, child.BrandID, child.OurPrice,
+					child.ImageURL, false, false, true, item.IsPreOrder, item.ID)
+				if err != nil {
+					return nil, fmt.Errorf("insert couple fulfillment product for item %d failed: %w", item.ID, err)
+				}
+				if firstID == 0 {
+					firstID = id
+				}
+			}
+			productIDs = append(productIDs, firstID)
+			continue
+		}
+
+		id, err := insertRow(item.VariantID, item.VariantSKU, item.VariantName, item.Qty,
+			item.ProductName, item.SkuUniversal, item.BrandID, item.SellingPrice,
+			item.ImageURL, item.IsAddOn, item.IsBundling, item.IsCouple, item.IsPreOrder, item.ID)
 		if err != nil {
 			return nil, fmt.Errorf("insert fulfillment product for item %d failed: %w", item.ID, err)
 		}
@@ -1118,6 +1354,22 @@ func insertFulfillmentProducts(tx *gorm.DB, schema string, fulfillmentID int64,
 
 func updateFulfillmentProductOrderItemID(tx *gorm.DB, schema string, fulfillmentID int64, items []OrderItem) error {
 	for _, item := range items {
+		if len(item.CoupleIDs) > 0 {
+			res := tx.Exec(fmt.Sprintf(`
+				UPDATE %s.tr_fulfillment_product
+				SET order_item_id = COALESCE(NULLIF(order_item_id, 0), ?), is_couple = true
+				WHERE fulfillment_id = ? AND variant_id IN (%s)
+			`, schema, joinInt32s(item.CoupleIDs)),
+				item.ID, fulfillmentID,
+			)
+			if res.Error != nil {
+				return fmt.Errorf("update couple fulfillment product for item %d failed: %w", item.ID, res.Error)
+			}
+			fmt.Printf("[DEBUG] UpdateFulfillmentProductOrderItemID(couple): ff=%d, item=%d, coupleIDs=%v, rowsAffected=%d\n",
+				fulfillmentID, item.ID, item.CoupleIDs, res.RowsAffected)
+			continue
+		}
+
 		res := tx.Exec(fmt.Sprintf(`
 			UPDATE %s.tr_fulfillment_product
 			SET order_item_id = ?
@@ -1144,7 +1396,7 @@ func queryFulfillmentProducts(tx *gorm.DB, schema string, fulfillmentID int64) (
 	return rows, err
 }
 
-func queryCoveredVariants(tx *gorm.DB, schema string, orderID int64) (map[int64]bool, error) {
+func queryCoveredVariants(tx *gorm.DB, schema string, orderID int64, items []OrderItem) (map[int64]bool, error) {
 	type fpRow struct {
 		OrderItemID int64
 		VariantID   int32
@@ -1194,6 +1446,22 @@ func queryCoveredVariants(tx *gorm.DB, schema string, orderID int64) (map[int64]
 					covered[id] = true
 				}
 			}
+		}
+	}
+
+	for _, it := range items {
+		if len(it.CoupleIDs) == 0 {
+			continue
+		}
+		allPresent := true
+		for _, cid := range it.CoupleIDs {
+			if variantQty[cid] == 0 {
+				allPresent = false
+				break
+			}
+		}
+		if allPresent {
+			covered[it.ID] = true
 		}
 	}
 
