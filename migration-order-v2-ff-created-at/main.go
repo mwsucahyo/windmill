@@ -55,6 +55,10 @@ var createFFCases = []string{
 // this window.
 const createdAtGrace = 24 * time.Hour
 
+// defaultLogLimit caps how many pending logs a single run processes when the
+// caller does not pass a limit. Pass a negative limit to disable the cap.
+const defaultLogLimit = 100
+
 const logCollection = "migration_order_v2_log"
 
 type OrderTimestamp struct {
@@ -84,9 +88,13 @@ func newMongo(client *mongo.Client, dbName string) *mongoRepository {
 	return &mongoRepository{client: client, dbName: dbName}
 }
 
-func (r *mongoRepository) findPendingLogs(ctx context.Context, filter bson.M) ([]migrationLog, error) {
+func (r *mongoRepository) findPendingLogs(ctx context.Context, filter bson.M, limit int64) ([]migrationLog, error) {
 	coll := r.client.Database(r.dbName).Collection(logCollection)
-	cur, err := coll.Find(ctx, filter, options.Find().SetSort(bson.M{"migrated_at": 1}))
+	opts := options.Find().SetSort(bson.M{"migrated_at": 1})
+	if limit > 0 {
+		opts.SetLimit(limit)
+	}
+	cur, err := coll.Find(ctx, filter, opts)
 	if err != nil {
 		return nil, fmt.Errorf("query migration logs failed: %w", err)
 	}
@@ -118,6 +126,7 @@ type Usecase struct {
 	schema       string
 	orderNumbers []string
 	ffCase       string
+	limit        int64
 }
 
 func (u *Usecase) buildFilter() bson.M {
@@ -145,7 +154,7 @@ func (u *Usecase) Run() (interface{}, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	logs, err := u.mongoRepo.findPendingLogs(ctx, u.buildFilter())
+	logs, err := u.mongoRepo.findPendingLogs(ctx, u.buildFilter(), u.limit)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +168,14 @@ func (u *Usecase) Run() (interface{}, error) {
 		orderLabel = strings.Join(u.orderNumbers, ",")
 	}
 
+	limitLabel := "ALL"
+	if u.limit > 0 {
+		limitLabel = fmt.Sprintf("%d", u.limit)
+	}
+
 	if len(logs) == 0 {
-		return fmt.Sprintf("##### Fix FF created_at — %s\n\nNo pending migration logs found (case=%s, order_number=%s).",
-			u.schema, caseLabel, orderLabel), nil
+		return fmt.Sprintf("##### Fix FF created_at — %s\n\nNo pending migration logs found (case=%s, order_number=%s, limit=%s).",
+			u.schema, caseLabel, orderLabel, limitLabel), nil
 	}
 
 	var updatedOrders, updatedFFs, skipped int
@@ -200,12 +214,15 @@ func (u *Usecase) Run() (interface{}, error) {
 		rows = append(rows, fmt.Sprintf("| %d | %s | %s | %d |", lg.OrderID, lg.OrderNumber, lg.Case, n))
 	}
 
-	out := fmt.Sprintf("##### Fix FF created_at — %s, case=%s, order_number=%s\n\n", u.schema, caseLabel, orderLabel)
+	out := fmt.Sprintf("##### Fix FF created_at — %s, case=%s, order_number=%s, limit=%s\n\n", u.schema, caseLabel, orderLabel, limitLabel)
 	out += "| Order ID | Order Number | Case | Updated FF |\n"
 	out += "|---|---|---|---|\n"
 	out += strings.Join(rows, "\n")
 	out += fmt.Sprintf("\n\n**Summary:** %d logs scanned, %d orders updated, %d fulfillments updated, %d skipped",
 		len(logs), updatedOrders, updatedFFs, skipped)
+	if u.limit > 0 && int64(len(logs)) == u.limit {
+		out += fmt.Sprintf("\n\nLimit reached (%d) — run again to continue with the next batch.", u.limit)
+	}
 	return out, nil
 }
 
@@ -359,14 +376,30 @@ func connectDB(dsn string) (*gorm.DB, error) {
 	return gorm.Open(postgres.Open(dsn), config)
 }
 
-func Main(xmsCatalystDSN, mongoResourceOrURI, schema, orderNumbers, ffCase, environment string) (interface{}, error) {
+func Main(migrationParams struct {
+	Environment  string `json:"environment"`
+	Schema       string `json:"schema"`
+	OrderNumbers string `json:"order_numbers"`
+	Case         string `json:"case"`
+	Limit        int    `json:"limit"`
+}, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error) {
+	environment := migrationParams.Environment
 	if environment == "" {
 		environment = "dev"
+	}
+	// limit > 0: batasi log per run; limit == 0: default; limit < 0: tanpa batas.
+	limit64 := int64(migrationParams.Limit)
+	switch {
+	case limit64 == 0:
+		limit64 = defaultLogLimit
+	case limit64 < 0:
+		limit64 = 0
 	}
 	resources, ok := resourceByEnv[environment]
 	if !ok {
 		return nil, fmt.Errorf("unsupported environment %q, must be dev, stg, or prod", environment)
 	}
+	schema := migrationParams.Schema
 	if schema == "" {
 		return nil, fmt.Errorf("schema is required")
 	}
@@ -403,8 +436,9 @@ func Main(xmsCatalystDSN, mongoResourceOrURI, schema, orderNumbers, ffCase, envi
 		db:           db,
 		mongoRepo:    newMongo(mongoClient, extractDBName(mongoURI)),
 		schema:       schema,
-		orderNumbers: splitOrderNumbers(orderNumbers),
-		ffCase:       strings.TrimSpace(ffCase),
+		orderNumbers: splitOrderNumbers(migrationParams.OrderNumbers),
+		ffCase:       strings.TrimSpace(migrationParams.Case),
+		limit:        limit64,
 	}
 	return uc.Run()
 }

@@ -33,7 +33,27 @@ func main() {
 	ffCase := os.Getenv("MIGRATION_CASE")
 	environment := os.Getenv("MIGRATION_ENVIRONMENT")
 
-	res, err := inner.Main(xmsCatalystDSN, mongoURI, schema, orderNumbers, ffCase, environment)
+	limit := 0
+	if v := os.Getenv("MIGRATION_LIMIT"); v != "" {
+		if _, err := fmt.Sscanf(v, "%d", &limit); err != nil {
+			fmt.Printf("MIGRATION_LIMIT is not a number: %q\n", v)
+			return
+		}
+	}
+
+	res, err := inner.Main(struct {
+		Environment  string `json:"environment"`
+		Schema       string `json:"schema"`
+		OrderNumbers string `json:"order_numbers"`
+		Case         string `json:"case"`
+		Limit        int    `json:"limit"`
+	}{
+		Environment:  environment,
+		Schema:       schema,
+		OrderNumbers: orderNumbers,
+		Case:         ffCase,
+		Limit:        limit,
+	}, xmsCatalystDSN, mongoURI)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		return

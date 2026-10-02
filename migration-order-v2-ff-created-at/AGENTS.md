@@ -23,7 +23,13 @@ sets `created_at` correctly, so this is only for historical data.)
   Exports flat scalar params (Windmill-friendly):
 
   ```go
-  func Main(xmsCatalystDSN, mongoResourceOrURI, schema, orderNumbers, ffCase, environment string) (interface{}, error)
+  func Main(migrationParams struct {
+      Environment  string `json:"environment"`
+      Schema       string `json:"schema"`
+      OrderNumbers string `json:"order_numbers"`
+      Case         string `json:"case"`
+      Limit        int    `json:"limit"`
+  }, xmsCatalystDSN, mongoResourceOrURI string) (interface{}, error)
   ```
 
 - `cmd/main.go` — local runner; loads `.env` and passes env values.
@@ -35,6 +41,9 @@ sets `created_at` correctly, so this is only for historical data.)
   `26080412517777,26080412517788`; empty = all.
 - `ffCase` (optional): a single `case` value, e.g. `CREATE_CARRY_OUT`. Empty = the
   create cases listed in `createFFCases`.
+- `limit` (optional): max pending logs per run. `> 0` = cap; `0` = default 100;
+  `< 0` = no cap. Logs are sorted by `migrated_at` asc, so batches continue on the
+  next run (already-fixed logs are filtered out by `created_at_fixed_at`).
 - `environment` (optional): `dev` | `stg` | `prod`; default `dev`.
 
 ## Resource resolution
@@ -82,7 +91,8 @@ nothing to fix are **not** flagged and remain eligible for a future run. Mongo i
 
 Runner env vars: `XMS_CATALYST_DSN`, `XMS_CATALYST_MONGO_URI`, `MIGRATION_SCHEMA`,
 `MIGRATION_ENVIRONMENT` (default `dev`), `MIGRATION_ORDER_NUMBERS` (optional,
-comma-separated), `MIGRATION_CASE` (optional).
+comma-separated), `MIGRATION_CASE` (optional), `MIGRATION_LIMIT` (optional; unset =
+default 100, negative = unlimited).
 
 ## Gotchas
 
