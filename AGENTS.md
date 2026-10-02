@@ -67,7 +67,7 @@ hardcoded default in source.
 | `user/` | `inactive-user` |
 | `payment/` | `payment-cash-not-sync` |
 | `voucher/` | `missing_voucher_usage_orders` |
-| (flat) | `brand`, `courier`, `office`, `migration-order-v2`, `migration-order-v2-windmill` |
+| (flat) | `brand`, `courier`, `office`, `migration-order-v2`, `migration-order-v2-ff-created-at` |
 
 ## Gotchas
 
@@ -81,7 +81,7 @@ hardcoded default in source.
 - **`search_path=voila`** required in Catalyst DSNs.
 - **`missing_voucher_usage_orders`** uses snake_case — all other tools use kebab-case.
 - **`user/inactive-user`** is a write operation (updates 3 databases). Review carefully.
-- **`migration-order-v2-windmill`** is also a **write** operation (updates `tr_order`, inserts fulfillments) — see its local `AGENTS.md`. It resolves DSNs **only** from Windmill dev resources (`u/mirza/..._dev`); its structured sibling `migration-order-v2/` points at **prod** resources (`u/mirza/..._prod`, `f/voila_anomalies/voila_mongodb_prod`) — do not cross-wire.
+- **`migration-order-v2`** and **`migration-order-v2-ff-created-at`** are both **write** operations (update `tr_order` / insert-update fulfillments) — see each tool's local `AGENTS.md`. Both pick resources by environment (`dev`/`stg`/`prod`; default `dev`) via a hardcoded `resourceByEnv`. `migration-order-v2-ff-created-at` backfills `tr_fulfillment.created_at` for rows created by earlier migration runs and writes a fix flag back to the `migration_order_v2_log` Mongo collection.
 - **Excel export**: `xmsc-uf-excel` writes `.xlsx` via `excelize/v2`, not Markdown.
 - **Prometheus Pushgateway** optional — silently skipped if URL empty.
 - **`loadEnv` depth varies**: most try `.`, `../`, `../../`, `../../../`. `user/inactive-user/cmd` uses fixed `"../../.env"`. `courier` only goes 3 deep. `payment-cash-not-sync` goes 5 deep.

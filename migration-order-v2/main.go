@@ -54,6 +54,7 @@ type Order struct {
 	PaymentProgress  string
 	ProcessedAt      *time.Time
 	CompletedAt      *time.Time
+	CreatedAt        *time.Time
 	ShippingFee      float64
 	InsuranceFee     float64
 }
@@ -860,7 +861,7 @@ func queryOrders(db *gorm.DB, schema, startDate, endDate, orderNumbers string, l
 	query := fmt.Sprintf(`
 		SELECT o.id, o.order_number, o.reference_number, o.status_id, o.shipping_method::text,
 			   o.office_id, o.sales_channel_code, o.payment_progress::text,
-			   o.processed_at, o.completed_at, o.shipping_fee, o.insurance_fee
+			   o.processed_at, o.completed_at, o.created_at, o.shipping_fee, o.insurance_fee
 		FROM %s.tr_order o
 		WHERE %s
 		ORDER BY o.id
@@ -1212,7 +1213,7 @@ func insertFulfillment(tx *gorm.DB, schema string, o *Order, code string, data *
 				?, ?, ?, ?, ?, ?,
 				?, ?, ?, ?,
 				?, ?, ?,
-				NOW() + INTERVAL '1 DAY', NOW(), NOW())
+				NOW() + INTERVAL '1 DAY', COALESCE(?, NOW()), NOW())
 		RETURNING id
 	`, schema, schema, schema)
 
@@ -1225,11 +1226,25 @@ func insertFulfillment(tx *gorm.DB, schema string, o *Order, code string, data *
 		data.AwbNumber, data.IsDropship,
 		data.CourierServiceID, data.InsuranceFee, data.IsHasInsurance, data.ShippingFee,
 		data.OrderShippingID, data.CourierServiceCode, data.AwbSource,
+		resolveOrderTimestamp(o),
 	).Scan(&id).Error
 	if err != nil {
 		return 0, err
 	}
 	return id, nil
+}
+
+func resolveOrderTimestamp(o *Order) *time.Time {
+	if o.ProcessedAt != nil && !o.ProcessedAt.IsZero() {
+		return o.ProcessedAt
+	}
+	if o.CompletedAt != nil && !o.CompletedAt.IsZero() {
+		return o.CompletedAt
+	}
+	if o.CreatedAt != nil && !o.CreatedAt.IsZero() {
+		return o.CreatedAt
+	}
+	return nil
 }
 
 type CoupleChild struct {

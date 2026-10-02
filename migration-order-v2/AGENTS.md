@@ -175,6 +175,11 @@ The authoritative signal is `ms_product.couple_ids` (array of child product IDs)
   COMPLETED.
 - Fulfillment code: `"V"` (`"J"` for jamtangan) + `yymmdd` + last 3 digits of order
   number + 4-digit increment parsed from the last `tr_fulfillment.code`.
+- Created fulfillment `created_at` is **not** `NOW()`: `insertFulfillment` uses
+  `COALESCE(?, NOW())` where the value is `resolveOrderTimestamp(order)` =
+  `tr_order.processed_at` → `tr_order.completed_at` → `tr_order.created_at`
+  (first non-nil/non-zero). `updated_at` stays `NOW()`. To backfill rows created by
+  earlier runs, use the sibling `migration-order-v2-ff-created-at` tool.
 - Child `image_url` comes from `ms_product_image.url` where `"type" = 'MAIN'`
   (first row by `idx, id`, `is_deleted = false`, `deleted_at IS NULL`), resolved in
   `resolveCoupleChildren`.
